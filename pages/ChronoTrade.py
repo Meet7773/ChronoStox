@@ -27,6 +27,25 @@ hide_st_style = """
             """
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
+
+@st.cache_data(show_spinner="Loading stock list...")
+def load_tickers():
+    """UPDATED: Loads tickers from your local ticker.csv file."""
+    try:
+        df = pd.read_csv('data/ticker.csv')
+        # Ensure the 'Ticker' column exists
+        if 'Ticker' in df.columns:
+            return df['Ticker'].dropna().tolist()
+        else:
+            st.error("The 'Ticker' column was not found in your ticker.csv file.")
+            return []
+    except FileNotFoundError:
+        st.error("ticker.csv not found. Please place it in the root project directory.")
+        return []
+
+
+tickers = load_tickers()
+
 # --- Session State Initialization (same as before) ---
 if 'username' not in st.session_state:
     st.session_state.username = "D3sTr0"
@@ -37,7 +56,6 @@ if 'holdings' not in st.session_state:
         {"ticker": "RELIANCE.NS", "quantity": 20, "avg_price": 2800.00},
         {"ticker": "TCS.NS", "quantity": 10, "avg_price": 3850.00},
     ]
-
 
 st.title("⏳ ChronoTrade Simulation")
 
@@ -50,7 +68,6 @@ with st.sidebar:
     st.page_link("pages/Live_Market.py", label="Live Market", icon="📈")
     st.page_link("pages/My_Portfolio.py", label="My Folio", icon="💼")
     st.divider()
-
 
 # --- Define Historical Scenarios ---
 # In a real app, this could come from a database.
@@ -96,6 +113,8 @@ with st.sidebar:
         "Enter a Stock Ticker",
         value=selected_scenario["default_ticker"]
     ).upper()
+
+
 
     if st.button("Load Scenario Data", use_container_width=True, type="primary"):
         with st.spinner(
