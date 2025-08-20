@@ -54,7 +54,8 @@ with st.sidebar:
     # Note: These links will work once you rename the other files
     st.page_link("Dashboard.py", label="Indices", icon="🌎")
     st.page_link("pages/Live_Market.py", label="Live Market", icon="📈")
-    st.page_link("pages/My_Portfolio.py", label="My Folio", icon="💼")
+    st.page_link("pages/ChronoTrade.py", label="ChronoTrade", icon="⏳")
     st.page_link("pages/Stock_Screener.py", label="Stock Screener", icon="🔍")
+
     st.divider()
     st.metric(label="Virtual Cash", value=f"₹{st.session_state.virtual_cash:,.2f}")
