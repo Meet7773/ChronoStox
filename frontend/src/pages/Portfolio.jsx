@@ -1,107 +1,130 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
+import React, { useCallback, useEffect, useState } from "react";
+import axios from "axios";
+import TickerSearch from "../components/TickerSearch.jsx";
 
-const API_URL = '[http://127.0.0.1:8000](http://127.0.0.1:8000)';
-const USER_ID = 'college_project_user'; // Hardcoded user ID
+const API_URL = "http://127.0.0.1:8000";
+const USER_ID = "college_project_user";
 
-// --- TradeWidget Component ---
+function formatINR(value) {
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(value ?? 0);
+}
+
 function TradeWidget({ onTradeSuccess }) {
-  const [ticker, setTicker] = useState('');
-  const [quantity, setQuantity] = useState('');
-  const [price, setPrice] = useState('');
-  const [action, setAction] = useState('BUY');
-  const [status, setStatus] = useState({ message: '', isError: false, isLoading: false });
+  const [ticker, setTicker] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [price, setPrice] = useState("");
+  const [status, setStatus] = useState({ message: "", tone: "info", loading: false });
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setStatus({ message: `[EXECUTING_${action}...]`, isError: false, isLoading: true });
+  const reset = () => {
+    setTicker("");
+    setQuantity("1");
+    setPrice("");
+  };
 
+  const submitTrade = async (action) => {
+    if (status.loading) return;
+    const trimmedTicker = ticker.trim().toUpperCase();
+    const qty = Number.parseInt(quantity, 10);
+    const px = Number.parseFloat(price);
+
+    if (!trimmedTicker) {
+      setStatus({ message: "Enter a ticker symbol.", tone: "danger", loading: false });
+      return;
+    }
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setStatus({ message: "Quantity must be a positive integer.", tone: "danger", loading: false });
+      return;
+    }
+    if (!Number.isFinite(px) || px <= 0) {
+      setStatus({ message: "Price must be a positive number.", tone: "danger", loading: false });
+      return;
+    }
+
+    setStatus({ message: `Submitting ${action.toLowerCase()} order…`, tone: "info", loading: true });
     try {
       const response = await axios.post(`${API_URL}/trade`, {
         userId: USER_ID,
-        ticker: ticker.toUpperCase(),
-        quantity: parseInt(quantity, 10),
-        price: parseFloat(price),
-        action: action,
+        ticker: trimmedTicker,
+        quantity: qty,
+        price: px,
+        action,
       });
-
-      setStatus({ message: `[${action}_CONFIRMED]`, isError: false, isLoading: false });
-      // Clear form
-      setTicker('');
-      setQuantity('');
-      setPrice('');
-      // Call the parent's refresh function
-      onTradeSuccess(response.data.newPortfolio);
+      const next = response.data.newPortfolio ?? null;
+      setStatus({ message: response.data.message ?? "Trade executed.", tone: "success", loading: false });
+      reset();
+      onTradeSuccess(next);
     } catch (error) {
-      const errorMsg = error.response?.data?.detail || 'Trade failed. Check API connection.';
-      setStatus({ message: `[${action}_REJECTED] ${errorMsg}`, isError: true, isLoading: false });
+      const detail = error.response?.data?.detail ?? "Trade failed. Check API connectivity.";
+      setStatus({ message: detail, tone: "danger", loading: false });
     }
   };
 
   return (
-    <div className="border-2 border-matrix-green p-4">
-      <h3 className="text-xl -mt-1 mb-2">[TRADE_EXECUTION]</h3>
-      <form onSubmit={handleSubmit}>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="ticker">[TICKER]</label>
-            <input
-              id="ticker"
-              type="text"
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value)}
-              className="w-full bg-matrix-dark border border-matrix-green p-1 focus:outline-none focus:bg-matrix-green focus:text-matrix-dark"
-              required
-            />
-          </div>
-          <div>
-            <label htmlFor="quantity">[QUANTITY]</label>
-            <input
-              id="quantity"
-              type="number"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              className="w-full bg-matrix-dark border border-matrix-green p-1 focus:outline-none focus:bg-matrix-green focus:text-matrix-dark"
-              min="1"
-              step="1"
-              required
-            />
-          </div>
-        </div>
-        <div className="mt-4">
-          <label htmlFor="price">[PRICE]</label>
-          <input
-            id="price"
-            type="number"
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
-            className="w-full bg-matrix-dark border border-matrix-green p-1 focus:outline-none focus:bg-matrix-green focus:text-matrix-dark"
-            min="0.01"
-            step="0.01"
-            required
+    <div className="space-y-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
+      <div>
+        <h3 className="text-lg font-semibold text-[var(--color-text)]">Execute Order</h3>
+        <p className="text-sm text-[var(--color-text-muted)]">Send simulated trades to the ChronoStox portfolio.</p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="sm:col-span-1">
+          <TickerSearch
+            label="Ticker"
+            value={ticker}
+            onInputChange={(value) => setTicker(value.toUpperCase())}
+            onSelect={(item) => setTicker(item.ticker)}
+            helper="Pulls from ticker catalog"
           />
         </div>
-        <div className="flex space-x-4 mt-4">
-          <button
-            type="submit"
-            onClick={() => setAction('BUY')}
-            disabled={status.isLoading}
-            className="w-full bg-matrix-green text-matrix-dark font-bold py-2 px-4 hover:bg-opacity-80 disabled:opacity-50"
-          >
-            {status.isLoading && action === 'BUY' ? '[...]' : '[EXECUTE_BUY]'}
-          </button>
-          <button
-            type="submit"
-            onClick={() => setAction('SELL')}
-            disabled={status.isLoading}
-            className="w-full bg-matrix-dark text-matrix-green border-2 border-matrix-green font-bold py-2 px-4 hover:bg-matrix-green hover:text-matrix-dark disabled:opacity-50"
-          >
-            {status.isLoading && action === 'SELL' ? '[...]' : '[EXECUTE_SELL]'}
-          </button>
-        </div>
-      </form>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-[var(--color-text-muted)]">Quantity</span>
+          <input
+            type="number"
+            min={1}
+            value={quantity}
+            onChange={(event) => setQuantity(event.target.value)}
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 focus:border-[var(--color-accent)] focus:outline-none"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-sm">
+          <span className="text-[var(--color-text-muted)]">Price</span>
+          <input
+            type="number"
+            min={0.01}
+            step={0.01}
+            value={price}
+            onChange={(event) => setPrice(event.target.value)}
+            className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] px-3 py-2 focus:border-[var(--color-accent)] focus:outline-none"
+          />
+        </label>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <button
+          type="button"
+          onClick={() => submitTrade("BUY")}
+          disabled={status.loading}
+          className="flex-1 rounded-lg bg-[var(--color-accent)] px-4 py-2 font-semibold text-white transition hover:bg-[var(--color-accent)]/90 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {status.loading ? "Processing…" : "Buy"}
+        </button>
+        <button
+          type="button"
+          onClick={() => submitTrade("SELL")}
+          disabled={status.loading}
+          className="flex-1 rounded-lg border border-[var(--color-border)] px-4 py-2 font-semibold text-[var(--color-text)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {status.loading ? "Processing…" : "Sell"}
+        </button>
+      </div>
       {status.message && (
-        <div className={`mt-2 p-2 border ${status.isError ? 'text-red-500 border-red-500' : 'text-matrix-green border-matrix-green'}`}>
+        <div
+          className={`rounded-lg border px-3 py-2 text-sm ${
+            status.tone === "success"
+              ? "border-green-400 text-green-600"
+              : status.tone === "danger"
+              ? "border-red-400 text-red-500"
+              : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+          }`}
+        >
           {status.message}
         </div>
       )}
@@ -109,13 +132,11 @@ function TradeWidget({ onTradeSuccess }) {
   );
 }
 
-// --- Portfolio Page Component ---
 function Portfolio() {
   const [portfolio, setPortfolio] = useState(null);
-  const [error, setError] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // Use useCallback to create a stable function reference
   const fetchPortfolio = useCallback(async () => {
     setIsLoading(true);
     setError(null);
@@ -123,102 +144,130 @@ function Portfolio() {
       const response = await axios.get(`${API_URL}/portfolio/${USER_ID}`);
       setPortfolio(response.data);
     } catch (err) {
-      const errorMsg = err.response ? `API Error: ${err.response.data.detail}` : `Network Error: ${err.message}. Is the backend running?`;
-      setError(errorMsg);
+      const detail = err.response?.data?.detail ?? `Network error: ${err.message}`;
+      setError(detail);
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
-  }, []); // Empty dependency array means this function is created once
+  }, []);
 
-  // useEffect for initial data load
   useEffect(() => {
     fetchPortfolio();
-  }, [fetchPortfolio]); // fetchPortfolio is stable, so this runs once on mount
+  }, [fetchPortfolio]);
 
-  // Callback for the TradeWidget to update portfolio state
-  // This avoids a full re-fetch and makes the UI instant
-  const handleTradeSuccess = (newPortfolio) => {
-    setPortfolio(newPortfolio);
+  const handleTradeSuccess = (next) => {
+    if (next) {
+      setPortfolio(next);
+    } else {
+      fetchPortfolio();
+    }
   };
 
-  // --- Render Logic ---
   if (isLoading && !portfolio) {
-    return <div>[...LOADING_PORTFOLIO_DATA...]</div>;
+    return (
+      <div className="flex h-48 items-center justify-center rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-sm text-[var(--color-text-muted)]">
+        Loading portfolio…
+      </div>
+    );
   }
 
   if (error) {
     return (
-      <div className="border-2 border-red-500 p-4 text-red-500">
-        <h2 className="text-xl">[CONNECTION_FAILURE]</h2>
-        <p>{error}</p>
+      <div className="space-y-4 rounded-2xl border border-red-200 bg-red-50 p-6 text-sm text-red-600">
+        <div>
+          <h3 className="text-lg font-semibold text-red-700">Unable to load portfolio</h3>
+          <p>{error}</p>
+        </div>
         <button
+          type="button"
           onClick={fetchPortfolio}
-          className="mt-4 bg-matrix-green text-matrix-dark font-bold py-2 px-4 hover:bg-opacity-80"
+          className="rounded-lg bg-red-600 px-4 py-2 font-semibold text-white transition hover:bg-red-700"
         >
-          [RETRY_CONNECTION]
+          Retry
         </button>
       </div>
     );
   }
 
   if (!portfolio) {
-    return <div>[...NO_PORTFOLIO_DATA...]</div>;
+    return null;
   }
 
-  const { virtualCash, holdings, userId } = portfolio;
-  const formattedCash = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(virtualCash);
+  const totalHoldingsValue = portfolio.holdings.reduce((sum, holding) => sum + holding.quantity * holding.avgPrice, 0);
+  const cash = portfolio.virtualCash ?? 0;
+  const totalEquity = cash + totalHoldingsValue;
 
   return (
-    <div>
-      <h2 className="text-2xl mb-2">[USER_ID: {userId}]</h2>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <section className="space-y-8">
+      <header className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+        <div>
+          <h2 className="text-3xl font-semibold text-[var(--color-text)]">Portfolio Overview</h2>
+          <p className="text-[var(--color-text-muted)]">User: {portfolio.userId}</p>
+        </div>
+      </header>
 
-        {/* Left Column: Cash & Trading */}
-        <div className="md:col-span-1 flex flex-col gap-4">
-          <div className="border-2 border-matrix-green p-4">
-            <h3 className="text-xl -mt-1 mb-2">[LIQUID_ASSETS]</h3>
-            <p className="text-4xl">{formattedCash}</p>
-          </div>
+      <div className="grid gap-5 md:grid-cols-3">
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-sm">
+          <p className="text-xs uppercase text-[var(--color-text-muted)]">Total Equity</p>
+          <p className="mt-2 text-2xl font-semibold text-[var(--color-text)]">{formatINR(totalEquity)}</p>
+        </div>
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-sm">
+          <p className="text-xs uppercase text-[var(--color-text-muted)]">Cash</p>
+          <p className="mt-2 text-2xl font-semibold text-[var(--color-text)]">{formatINR(cash)}</p>
+        </div>
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-sm">
+          <p className="text-xs uppercase text-[var(--color-text-muted)]">Invested Value</p>
+          <p className="mt-2 text-2xl font-semibold text-[var(--color-text)]">{formatINR(totalHoldingsValue)}</p>
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-12">
+        <div className="lg:col-span-4">
           <TradeWidget onTradeSuccess={handleTradeSuccess} />
         </div>
-
-        {/* Right Column: Holdings */}
-        <div className="md:col-span-2 border-2 border-matrix-green p-4">
-          <h3 className="text-xl -mt-1 mb-2">[HOLDINGS_OVERVIEW]</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="border-b-2 border-matrix-green text-left">
-                  <th className="p-2">[TICKER]</th>
-                  <th className="p-2">[QUANTITY]</th>
-                  <th className="p-2">[AVG_PRICE]</th>
-                  <th className="p-2">[MARKET_VALUE]</th>
-                </tr>
-              </thead>
-              <tbody>
-                {holdings.length > 0 ? (
-                  holdings.map((stock) => {
-                    const marketValue = stock.quantity * stock.avgPrice; // Note: In a real app, this would use live price
-                    return (
-                      <tr key={stock.ticker} className="border-b border-matrix-green/50">
-                        <td className="p-2">{stock.ticker}</td>
-                        <td className="p-2">{stock.quantity}</td>
-                        <td className="p-2">{new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(stock.avgPrice)}</td>
-                        <td className="p-2">{new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(marketValue)}</td>
-                      </tr>
-                    );
-                  })
-                ) : (
+        <div className="card lg:col-span-8">
+          <div className="p-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-[var(--color-text)]">Positions</h3>
+              <span className="text-xs text-[var(--color-text-muted)]">{portfolio.holdings.length} holdings</span>
+            </div>
+            <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--color-border)]">
+              <table className="min-w-full divide-y divide-[var(--color-border)]">
+                <thead className="bg-[var(--color-surface-muted)]/40 text-xs uppercase tracking-wide text-[var(--color-text-muted)]">
                   <tr>
-                    <td colSpan="4" className="p-2 text-center">[...No securities held...]</td>
+                    <th className="px-4 py-3 text-left">Ticker</th>
+                    <th className="px-4 py-3 text-right">Quantity</th>
+                    <th className="px-4 py-3 text-right">Avg Price</th>
+                    <th className="px-4 py-3 text-right">Book Value</th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-[var(--color-border)] bg-[var(--color-surface-elevated)] text-sm">
+                  {portfolio.holdings.length ? (
+                    portfolio.holdings.map((holding) => {
+                      const bookValue = holding.quantity * holding.avgPrice;
+                      return (
+                        <tr key={holding.ticker} className="hover:bg-[var(--color-accent-soft)]/60">
+                          <td className="px-4 py-3 font-semibold text-[var(--color-text)]">{holding.ticker}</td>
+                          <td className="px-4 py-3 text-right text-[var(--color-text)]">{holding.quantity}</td>
+                          <td className="px-4 py-3 text-right text-[var(--color-text)]">{formatINR(holding.avgPrice)}</td>
+                          <td className="px-4 py-3 text-right text-[var(--color-text)]">{formatINR(bookValue)}</td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-6 text-center text-sm text-[var(--color-text-muted)]">
+                        No holdings yet. Execute a trade to build your portfolio.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
-
       </div>
-    </div>
+    </section>
   );
 }
 

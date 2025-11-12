@@ -4,6 +4,7 @@ import certifi
 import logging
 import urllib.parse
 import datetime
+from pathlib import Path
 from typing import Optional
 from pymongo import MongoClient, UpdateOne
 from pymongo.errors import ConnectionFailure, OperationFailure
@@ -13,8 +14,10 @@ from dotenv import load_dotenv
 log = logging.getLogger("database")
 logging.basicConfig(level=logging.INFO, format='%(name)s:%(levelname)s:%(message)s')
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file (prioritize local api/.env)
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(ENV_PATH, override=False)
+load_dotenv(override=False)
 
 # Global client variable
 client: Optional[MongoClient] = None
