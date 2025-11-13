@@ -1,7 +1,8 @@
 fastapi==0.111.0
 uvicorn[standard]==0.32.0
-pymongo==4.9.2
+sqlmodel==0.0.16
 python-dotenv==1.0.1
 yfinance==0.2.48
 certifi==2024.8.30
-
+pandas==2.2.0
+passlib[bcrypt]==1.7.4
