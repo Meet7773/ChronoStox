@@ -16,7 +16,7 @@ from utils.sidebar import render_sidebar
 from utils.auth import require_login
 
 user_id = require_login()
-render_sidebar(show_cash=True)  # Show cash on Overview page
+render_sidebar(show_cash=False)  # Show cash on Overview page
 
 # API endpoint
 API_URL = "http://127.0.0.1:8000"
@@ -248,9 +248,7 @@ else:
                 # --- THIS IS THE CHANGE ---
                 # Make the card clickable to navigate to the Live Market page
                 if st.button(f"View Details", key=f"btn_{i}", use_container_width=True):
-                    # Store the ticker in session state for the other page to pick up
                     st.session_state.prefilled_ticker = index['ticker']
-                    # Programmatically switch to the Live_Market page
                     st.switch_page("pages/Live_Market.py")
 
     # --- THIS BLOCK IS REMOVED ---

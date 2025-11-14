@@ -4,10 +4,14 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
-import yfinance as yf
+import requests
 import plotly.graph_objects as go
 
 from utils.sidebar import render_sidebar
+from utils.auth import require_login
+
+# API endpoint
+API_URL = "http://127.0.0.1:8000"
 
 # Page config & style
 st.set_page_config(page_title="Live Market", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
@@ -21,7 +25,12 @@ hide_st_style = """
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
 # Render centralized sidebar (always render)
-render_sidebar()
+user_id = require_login()
+render_sidebar(show_cash=False)
+
+if st.session_state.get("prefilled_ticker"):
+    st.session_state.ticker = st.session_state.prefilled_ticker
+    st.session_state.prefilled_ticker = None
 
 # ---------------- Helpers & caching (no UI inside) ---------------------------
 DEFAULT_TICKERS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
@@ -50,45 +59,68 @@ def load_tickers_from_csv(path: str = TICKER_CSV_PATH):
     tickers = df["Ticker"].dropna().astype(str).str.strip().str.upper().unique().tolist()
     return tickers or DEFAULT_TICKERS
 
-@st.cache_data(ttl=60 * 60)
+@st.cache_data(ttl=60)
 def get_stock_info(ticker: str) -> dict:
+    """Fetch stock info from API."""
     try:
-        return yf.Ticker(ticker).info or {}
+        res = requests.get(f"{API_URL}/stock/{ticker}")
+        res.raise_for_status()
+        return res.json()
     except Exception:
         return {}
 
 @st.cache_data(ttl=60 * 10)
 def fetch_history(ticker: str, days: int = 365) -> pd.DataFrame:
+    """Fetch history from API and convert to DataFrame."""
     try:
+        # Calculate start date
         end = datetime.now()
         start = end - timedelta(days=days)
-        df = yf.Ticker(ticker).history(start=start, end=end, auto_adjust=False)
-        if not df.empty and getattr(df.index, "tz", None) is not None:
-            df.index = df.index.tz_localize(None)
+        
+        # Fetch from API
+        res = requests.get(
+            f"{API_URL}/history/{ticker}",
+            params={"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")}
+        )
+        res.raise_for_status()
+        data = res.json()
+        
+        if not data:
+            return pd.DataFrame()
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(data)
+        if "time" in df.columns:
+            df["Date"] = pd.to_datetime(df["time"])
+            df.set_index("Date", inplace=True)
+            df = df[["open", "high", "low", "close", "volume"]]
+            df.columns = ["Open", "High", "Low", "Close", "Volume"]
+        
         return df
     except Exception:
         return pd.DataFrame()
 
 @st.cache_data(ttl=60 * 5)
 def fetch_news_yf(ticker: str):
-    try:
-        return yf.Ticker(ticker).news or []
-    except Exception:
-        return []
+    """Note: News endpoint not yet implemented in API. Return empty for now."""
+    # TODO: Add news endpoint to API if needed
+    return []
 
 # ---------------- Shared session-state defaults -----------------------------
-if "username" not in st.session_state:
-    st.session_state.username = "D3sTr0"
-if "virtual_cash" not in st.session_state:
-    st.session_state.virtual_cash = 100_000.00
-if "holdings" not in st.session_state:
-    st.session_state.holdings = {}
-if "trades" not in st.session_state:
-    st.session_state.trades = []
 if "ticker" not in st.session_state:
     st.session_state.ticker = "RELIANCE.NS"
 if "ticker_data" not in st.session_state:
     st.session_state.ticker_data = pd.DataFrame()
+
+# Fetch portfolio for sidebar display
+@st.cache_data(ttl=60)
+def fetch_portfolio(user_id: str):
+    try:
+        res = requests.get(f"{API_URL}/portfolio/{user_id}")
+        res.raise_for_status()
+        return res.json()
+    except Exception:
+        return None
 
 # ---------------- Sidebar: load tickers (no uploader) ------------------------
 tickers = load_tickers_from_csv()
@@ -116,9 +148,11 @@ with st.sidebar:
 
 with st.sidebar:
     st.divider()
-    st.metric(label="Virtual Cash", value=f"₹{st.session_state.virtual_cash:,.2f}")
-    pos_total = sum([h.get('quantity', 0) for h in st.session_state.holdings.values()])
-    st.caption(f"Total Positions: {pos_total}")
+    portfolio = fetch_portfolio(user_id)
+    if portfolio:
+        st.metric(label="Virtual Cash", value=f"₹{portfolio.get('virtualCash', 0):,.2f}")
+        pos_total = sum([h.get('quantity', 0) for h in portfolio.get('holdings', [])])
+        st.caption(f"Total Positions: {pos_total}")
 
 # ---------------- Main ------------------------------------------------------
 if st.session_state.ticker_data.empty:
@@ -128,7 +162,7 @@ else:
     df = st.session_state.ticker_data
     info = get_stock_info(ticker)
 
-    st.header(f"{info.get('longName', ticker)} — {ticker}")
+    st.header(f"{info.get('name', ticker)} — {ticker}")
 
     tab1, tab2, tab3 = st.tabs(["Price Chart & Trading", "Key Information", "Recent News"])
 
@@ -153,58 +187,66 @@ else:
 
         # BUY
         if buy_col.button("BUY", use_container_width=True):
-            cost = est_cost
-            if st.session_state.virtual_cash >= cost:
-                h = st.session_state.holdings.get(ticker, {"quantity": 0, "avg_price": 0.0})
-                new_qty = h['quantity'] + qty
-                new_avg = ((h['avg_price'] * h['quantity']) + cost) / new_qty if new_qty else 0.0
-                st.session_state.holdings[ticker] = {"quantity": new_qty, "avg_price": new_avg}
-                st.session_state.virtual_cash -= cost
-                st.session_state.trades.append({
-                    "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "ticker": ticker,
-                    "action": "BUY",
+            try:
+                payload = {
+                    "userId": user_id,
+                    "ticker": ticker.upper(),
                     "quantity": int(qty),
-                    "price": round(current_price, 4),
-                    "value": round(cost, 2),
-                })
-                st.success(f"Bought {qty} × {ticker} @ ₹{current_price:,.2f}")
-            else:
-                st.error("Not enough virtual cash.")
+                    "action": "BUY",
+                    "price": current_price
+                }
+                res = requests.post(f"{API_URL}/trade", json=payload)
+                res.raise_for_status()
+                result = res.json()
+                st.success(result.get("message", f"Bought {qty} × {ticker} @ ₹{current_price:,.2f}"))
+                st.cache_data.clear()
+                st.rerun()
+            except requests.exceptions.RequestException as e:
+                error_detail = "Unknown error"
+                try:
+                    error_detail = e.response.json().get("detail", "Unknown error")
+                except:
+                    pass
+                st.error(f"Trade Failed: {error_detail}")
 
         # SELL
         if sell_col.button("SELL", use_container_width=True):
-            h = st.session_state.holdings.get(ticker, {"quantity": 0, "avg_price": 0.0})
-            if qty > h.get('quantity', 0):
-                st.error("Not enough holdings to sell.")
-            else:
-                proceeds = qty * current_price
-                h['quantity'] -= qty
-                if h['quantity'] == 0:
-                    h['avg_price'] = 0.0
-                st.session_state.holdings[ticker] = h
-                st.session_state.virtual_cash += proceeds
-                st.session_state.trades.append({
-                    "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "ticker": ticker,
-                    "action": "SELL",
+            try:
+                payload = {
+                    "userId": user_id,
+                    "ticker": ticker.upper(),
                     "quantity": int(qty),
-                    "price": round(current_price, 4),
-                    "value": round(proceeds, 2),
-                })
-                st.success(f"Sold {qty} × {ticker} @ ₹{current_price:,.2f}")
+                    "action": "SELL",
+                    "price": current_price
+                }
+                res = requests.post(f"{API_URL}/trade", json=payload)
+                res.raise_for_status()
+                result = res.json()
+                st.success(result.get("message", f"Sold {qty} × {ticker} @ ₹{current_price:,.2f}"))
+                st.cache_data.clear()
+                st.rerun()
+            except requests.exceptions.RequestException as e:
+                error_detail = "Unknown error"
+                try:
+                    error_detail = e.response.json().get("detail", "Unknown error")
+                except:
+                    pass
+                st.error(f"Trade Failed: {error_detail}")
 
         st.divider()
-        h = st.session_state.holdings.get(ticker, {"quantity": 0, "avg_price": 0.0})
-        st.subheader("Holdings Summary")
-        holdings_df = pd.DataFrame([{
-            "Ticker": ticker,
-            "Quantity": h.get('quantity', 0),
-            "Avg Price": round(h.get('avg_price', 0.0), 2),
-            "Last Price": round(current_price, 2),
-            "Unrealized P&L": round((current_price - h.get('avg_price', 0.0)) * h.get('quantity', 0), 2)
-        }])
-        st.dataframe(holdings_df, use_container_width=True)
+        portfolio = fetch_portfolio(user_id)
+        holdings_list = portfolio.get('holdings', []) if portfolio else []
+        ticker_holding = next((h for h in holdings_list if h['ticker'] == ticker.upper()), None)
+        if ticker_holding:
+            st.subheader("Holdings Summary")
+            holdings_df = pd.DataFrame([{
+                "Ticker": ticker,
+                "Quantity": ticker_holding.get('quantity', 0),
+                "Avg Price": round(ticker_holding.get('avgPrice', 0.0), 2),
+                "Last Price": round(current_price, 2),
+                "Unrealized P&L": round((current_price - ticker_holding.get('avgPrice', 0.0)) * ticker_holding.get('quantity', 0), 2)
+            }])
+            st.dataframe(holdings_df, use_container_width=True)
 
     # Tab 2: Key Info
     with tab2:
@@ -213,24 +255,16 @@ else:
             "Market Cap": info.get('marketCap', 'N/A'),
             "Sector": info.get('sector', 'N/A'),
             "Industry": info.get('industry', 'N/A'),
-            "52 Week High": info.get('fiftyTwoWeekHigh', 'N/A'),
-            "52 Week Low": info.get('fiftyTwoWeekLow', 'N/A'),
-            "Forward P/E": info.get('forwardPE', 'N/A')
+            "Current Price": info.get('currentPrice', 'N/A'),
+            "Change": info.get('change', 'N/A'),
+            "Change %": f"{info.get('changePct', 0):.2f}%" if info.get('changePct') else 'N/A',
+            "Volume": info.get('volume', 'N/A'),
         }
         st.json(key_info)
-        if info.get('longBusinessSummary'):
-            st.markdown('#### Business Summary')
-            st.write(info.get('longBusinessSummary'))
 
         st.divider()
-        st.markdown("### My Trades")
-        trades_df = pd.DataFrame(st.session_state.trades)
-        if trades_df.empty:
-            st.info("No trades yet.")
-        else:
-            st.dataframe(trades_df[::-1], use_container_width=True)
-            csv = trades_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Trades CSV", data=csv, file_name="live_trades.csv", mime='text/csv')
+        st.markdown("### Company Information")
+        st.info("Trade history is stored in the database. View your portfolio page for full trade history.")
 
     # Tab 3: News
     with tab3:

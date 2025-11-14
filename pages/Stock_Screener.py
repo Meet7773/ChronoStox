@@ -7,7 +7,13 @@ from typing import List
 
 import pandas as pd
 import streamlit as st
-import yfinance as yf
+import requests
+
+from utils.sidebar import render_sidebar
+from utils.auth import require_login
+
+# API endpoint
+API_URL = "http://127.0.0.1:8000"
 
 # ----------------------------- Page config & styles --------------------------
 st.set_page_config(
@@ -26,30 +32,8 @@ hide_st_style = """
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
 # ----------------------------- Shared sidebar (graceful fallback) -----------
-def _fallback_sidebar():
-    with st.sidebar:
-        st.title("ChronoStox")
-        st.divider()
-        # Adjust these paths to match your app's filenames if needed
-        st.page_link("Dashboard.py", label="🌎 Market Overview")
-        st.page_link("pages/Live_Market.py", label="📈 Live Market")
-        st.page_link("pages/ChronoTrade.py", label="⏳ ChronoTrade")
-        st.page_link("pages/My_Portfolio.py", label="💼 My Portfolio")
-        st.page_link("pages/Stock_Screener.py", label="🔍 Stock Screener")
-        st.divider()
-        st.metric("Virtual Cash", f"₹{st.session_state.get('virtual_cash', 100000.0):,.2f}")
-        holdings = st.session_state.get("holdings", [])
-        if isinstance(holdings, dict):
-            total_positions = sum(h.get("quantity", 0) for h in holdings.values())
-        else:
-            total_positions = sum((h or {}).get("quantity", 0) for h in holdings) if isinstance(holdings, list) else 0
-        st.caption(f"Total Positions: {total_positions}")
-
-try:
-    from utils.sidebar import render_sidebar
-    render_sidebar()
-except Exception:
-    _fallback_sidebar()
+user_id = require_login()
+render_sidebar(show_cash=False)
 
 # ----------------------------- Helpers --------------------------------------
 DEFAULT_TICKER_CSV = "data/ticker.csv"
@@ -98,8 +82,11 @@ def load_full_ticker_data(path: str = DEFAULT_TICKER_CSV) -> pd.DataFrame:
 
 @st.cache_data(ttl=60 * 5)
 def yf_info(ticker: str) -> dict:
+    """Fetch stock info from API."""
     try:
-        return yf.Ticker(ticker).info or {}
+        res = requests.get(f"{API_URL}/stock/{ticker}")
+        res.raise_for_status()
+        return res.json()
     except Exception:
         return {}
 
@@ -227,20 +214,18 @@ else:
     with st.expander(f"Details for {sel_ticker}", expanded=False):
         info = yf_info(sel_ticker)
         if info:
-            price = info.get("regularMarketPrice", None)
+            price = info.get("currentPrice", None)
             if price is not None:
                 st.metric("Current Price", f"₹{price:,.2f}")
             meta = {
                 "Market Cap": info.get("marketCap", "N/A"),
                 "Sector": info.get("sector", "N/A"),
                 "Industry": info.get("industry", "N/A"),
-                "Website": info.get("website", "N/A"),
+                "Change": f"{info.get('changePct', 0):.2f}%" if info.get('changePct') else "N/A",
+                "Volume": info.get("volume", "N/A"),
             }
             st.write(meta)
-            if info.get("longBusinessSummary"):
-                st.markdown("#### Business Summary")
-                st.write(info.get("longBusinessSummary"))
         else:
-            st.info("No extra info available from yfinance for this ticker.")
+            st.info("No extra info available from API for this ticker.")
 
 st.caption("Tip: Only local CSV is used here. Ensure 'data/ticker.csv' is kept up-to-date.")
