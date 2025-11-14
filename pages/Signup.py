@@ -48,11 +48,13 @@ with st.form("signup_form", clear_on_submit=False):
                 )
                 res.raise_for_status()
                 st.success("Signup complete! Redirecting to dashboard...")
-                st.session_state.auth_user = username_clean
+                user_id = username_clean
+                st.session_state.auth_user = user_id
                 data = res.json()
                 st.session_state.portfolio_cache = data.get("portfolio")
                 st.session_state.simulation_cache = data.get("simulation")
                 st.cache_data.clear()
+                st.query_params["user"] = user_id
                 st.switch_page("pages/Dashboard.py")
             except requests.exceptions.RequestException as exc:
                 detail = "Unable to create account."

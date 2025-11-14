@@ -27,6 +27,7 @@ def render_sidebar(show_cash: bool = False):
 
     user_id = st.session_state.get("auth_user")
     if user_id:
+        st.query_params["user"] = user_id
         st.sidebar.caption(f"Signed in as **{user_id}**")
     else:
         st.sidebar.caption("Not signed in")
@@ -67,5 +68,6 @@ def render_sidebar(show_cash: bool = False):
                 ):
                     st.session_state.pop(key, None)
             st.cache_data.clear()
+            st.query_params.clear()
             st.switch_page("Login.py")
 

@@ -35,7 +35,7 @@ user_id = require_login()
 render_sidebar(show_cash=False)
 
 # --- API Functions ---
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_indices():
     """Fetch market indices."""
     try:
@@ -47,11 +47,64 @@ def fetch_indices():
 
 @st.cache_data(ttl=60 * 5)
 def fetch_stock_news(ticker: str):
-    """Fetch news for a specific ticker."""
+    """Fetch news for a specific ticker using the logic from test/news.py"""
     try:
+        from datetime import timezone
         ticker_obj = yf.Ticker(ticker)
         news = ticker_obj.news
-        return news or []
+        
+        if not news:
+            return []
+        
+        # Process news items similar to test/news.py
+        processed_news = []
+        for item in news:
+            content = item.get("content", {})
+            
+            # Extract title
+            title = content.get('title') or item.get('title', 'No Title')
+            
+            # Extract summary
+            summary = content.get('summary') or item.get('summary', '')
+            
+            # Extract link
+            link = None
+            if isinstance(content.get('canonicalUrl'), dict):
+                link = content.get('canonicalUrl', {}).get('url')
+            if not link:
+                link = item.get('link', '#')
+            
+            # Extract publisher
+            publisher = item.get('publisher', 'Unknown')
+            
+            # Extract publish time (similar to news.py logic)
+            pub_time = None
+            if "providerPublishTime" in item:
+                try:
+                    pub_time = datetime.fromtimestamp(item["providerPublishTime"], tz=timezone.utc)
+                except Exception:
+                    pass
+            
+            if pub_time is None:
+                pub_date_str = content.get("pubDate")
+                if pub_date_str:
+                    try:
+                        pub_time = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
+                    except:
+                        pass
+            
+            processed_news.append({
+                'title': title,
+                'summary': summary,
+                'link': link,
+                'publisher': publisher,
+                'providerPublishTime': item.get('providerPublishTime'),
+                'pub_time': pub_time,
+                'ticker': ticker,
+                'raw': item
+            })
+        
+        return processed_news
     except Exception:
         return []
 
@@ -119,6 +172,17 @@ with tab2:
             except Exception as e:
                 continue
     
+    # Also fetch news for major indices
+    index_tickers = ["^GSPC", "^DJI", "^IXIC", "^NSEI", "^BSESN"]
+    with st.spinner("Fetching index news..."):
+        for idx_ticker in index_tickers:
+            try:
+                news_list = fetch_stock_news(idx_ticker)
+                if news_list:
+                    all_news.extend(news_list)
+            except Exception:
+                continue
+    
     # Remove duplicates based on title
     seen_titles = set()
     unique_news = []
@@ -129,7 +193,13 @@ with tab2:
             unique_news.append(article)
     
     # Sort by publish time (newest first)
-    unique_news.sort(key=lambda x: x.get('providerPublishTime', 0), reverse=True)
+    def get_sort_key(article):
+        pub_time = article.get('pub_time')
+        if pub_time:
+            return pub_time.timestamp()
+        return article.get('providerPublishTime', 0)
+    
+    unique_news.sort(key=get_sort_key, reverse=True)
     
     if unique_news:
         st.markdown(f"#### Found {len(unique_news)} unique articles")
@@ -144,27 +214,34 @@ with tab2:
                 title = article.get('title', 'No Title')
                 link = article.get('link', '#')
                 publisher = article.get('publisher', 'Unknown')
+                summary = article.get('summary', '')
+                ticker_source = article.get('ticker', '')
                 
                 # Get publish time
-                pub_time = article.get('providerPublishTime')
+                pub_time = article.get('pub_time')
                 if pub_time:
-                    try:
-                        pub_str = datetime.fromtimestamp(pub_time).strftime('%Y-%m-%d %H:%M')
-                    except:
-                        pub_str = 'Unknown Date'
+                    pub_str = pub_time.strftime('%Y-%m-%d %H:%M')
                 else:
-                    pub_str = 'Unknown Date'
+                    pub_time_raw = article.get('providerPublishTime')
+                    if pub_time_raw:
+                        try:
+                            pub_str = datetime.fromtimestamp(pub_time_raw).strftime('%Y-%m-%d %H:%M')
+                        except:
+                            pub_str = 'Unknown Date'
+                    else:
+                        pub_str = 'Unknown Date'
                 
                 # Display article
                 with st.container(border=True):
                     st.markdown(f"### [{title}]({link})")
-                    st.caption(f"📰 {publisher} | 📅 {pub_str}")
+                    caption_text = f"📰 {publisher} | 📅 {pub_str}"
+                    if ticker_source:
+                        caption_text += f" | 📊 {ticker_source}"
+                    st.caption(caption_text)
                     
-                    # Try to get summary/description
-                    if 'summary' in article:
-                        st.write(article['summary'])
-                    elif 'longSummary' in article:
-                        st.write(article['longSummary'])
+                    # Display summary
+                    if summary:
+                        st.write(summary)
                 
                 shown += 1
             except Exception as e:

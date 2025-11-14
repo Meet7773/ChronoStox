@@ -71,7 +71,7 @@ st.markdown("""
 
 
 # --- API Fetching Functions ---
-@st.cache_data(ttl=60)  # Cache for 60 seconds
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def fetch_indices():
     try:
         res = requests.get(f"{API_URL}/indices")

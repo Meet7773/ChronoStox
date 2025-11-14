@@ -26,11 +26,13 @@ if st.session_state.get("auth_user"):
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Go to Dashboard", use_container_width=True):
+            st.query_params["user"] = st.session_state.auth_user
             st.switch_page("pages/Dashboard.py")
     with col2:
         if st.button("Log out", use_container_width=True):
             for key in list(st.session_state.keys()):
                 st.session_state.pop(key, None)
+            st.query_params.clear()
             st.cache_data.clear()
             st.experimental_rerun()
     st.stop()
@@ -54,11 +56,13 @@ with st.form("login_form", clear_on_submit=False):
                 )
                 res.raise_for_status()
                 data = res.json()
-                st.session_state.auth_user = username.strip()
+                user_id = username.strip()
+                st.session_state.auth_user = user_id
                 st.session_state.portfolio_cache = data.get("portfolio")
                 st.session_state.simulation_cache = data.get("simulation")
                 st.cache_data.clear()
                 st.success("Login successful! Redirecting...")
+                st.query_params["user"] = user_id
                 st.switch_page("pages/Dashboard.py")
             except requests.exceptions.RequestException as exc:
                 detail = "Unable to connect to server."

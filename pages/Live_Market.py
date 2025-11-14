@@ -28,10 +28,6 @@ st.markdown(hide_st_style, unsafe_allow_html=True)
 user_id = require_login()
 render_sidebar(show_cash=False)
 
-if st.session_state.get("prefilled_ticker"):
-    st.session_state.ticker = st.session_state.prefilled_ticker
-    st.session_state.prefilled_ticker = None
-
 # ---------------- Helpers & caching (no UI inside) ---------------------------
 DEFAULT_TICKERS = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
 TICKER_CSV_PATH = "data/ticker.csv"
@@ -100,11 +96,88 @@ def fetch_history(ticker: str, days: int = 365) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+# Handle prefilled ticker from Dashboard (after helpers defined)
+if st.session_state.get("prefilled_ticker"):
+    prefilled_ticker = st.session_state.prefilled_ticker
+    st.session_state.ticker = prefilled_ticker
+    with st.spinner(f"Loading data for {prefilled_ticker}..."):
+        df_prefilled = fetch_history(prefilled_ticker, days=730)
+        if not df_prefilled.empty:
+            st.session_state.ticker_data = df_prefilled
+    st.session_state.prefilled_ticker = None
+
 @st.cache_data(ttl=60 * 5)
 def fetch_news_yf(ticker: str):
-    """Note: News endpoint not yet implemented in API. Return empty for now."""
-    # TODO: Add news endpoint to API if needed
-    return []
+    """Fetch news from yfinance using the logic from test/news.py"""
+    try:
+        import yfinance as yf
+        from datetime import timezone
+        
+        ticker_obj = yf.Ticker(ticker)
+        news = ticker_obj.news
+        
+        if not news:
+            return []
+        
+        # Process news items similar to test/news.py
+        processed_news = []
+        for item in news:
+            content = item.get("content", {})
+            
+            # Extract title
+            title = content.get('title') or item.get('title', 'No Title')
+            
+            # Extract summary
+            summary = content.get('summary') or item.get('summary', '')
+            
+            # Extract link
+            link = None
+            if isinstance(content.get('canonicalUrl'), dict):
+                link = content.get('canonicalUrl', {}).get('url')
+            if not link:
+                link = item.get('link', '#')
+            
+            # Extract publisher
+            publisher = item.get('publisher', 'Unknown')
+            
+            # Extract publish time (similar to news.py logic)
+            pub_time = None
+            if "providerPublishTime" in item:
+                try:
+                    pub_time = datetime.fromtimestamp(item["providerPublishTime"], tz=timezone.utc)
+                except Exception:
+                    pass
+            
+            if pub_time is None:
+                pub_date_str = content.get("pubDate")
+                if pub_date_str:
+                    try:
+                        pub_time = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
+                    except:
+                        pass
+            
+            # Extract thumbnail
+            thumbnail = content.get('thumbnail') if isinstance(content.get('thumbnail'), dict) else None
+            image_url = None
+            if thumbnail and 'resolutions' in thumbnail and len(thumbnail['resolutions']) > 0:
+                image_url = thumbnail['resolutions'][0].get('url')
+            
+            processed_news.append({
+                'title': title,
+                'summary': summary,
+                'link': link,
+                'publisher': publisher,
+                'providerPublishTime': item.get('providerPublishTime'),
+                'pub_time': pub_time,
+                'image_url': image_url,
+                'content': content,
+                'raw': item
+            })
+        
+        return processed_news
+    except Exception as e:
+        st.warning(f"Error fetching news: {e}")
+        return []
 
 # ---------------- Shared session-state defaults -----------------------------
 if "ticker" not in st.session_state:
@@ -124,6 +197,11 @@ def fetch_portfolio(user_id: str):
 
 # ---------------- Sidebar: load tickers (no uploader) ------------------------
 tickers = load_tickers_from_csv()
+
+# Ensure the currently selected ticker (possibly set via Dashboard) is in the list
+current_selected_ticker = st.session_state.get("ticker", DEFAULT_TICKERS[0])
+if current_selected_ticker not in tickers:
+    tickers = [current_selected_ticker] + [t for t in tickers if t != current_selected_ticker]
 
 # Show warning if file missing or invalid (only informative)
 if not os.path.exists(TICKER_CSV_PATH):
@@ -164,7 +242,7 @@ else:
 
     st.header(f"{info.get('name', ticker)} — {ticker}")
 
-    tab1, tab2, tab3 = st.tabs(["Price Chart & Trading", "Key Information", "Recent News"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Price Chart & Trading", "Key Information", "Recent News", "Trade Engine"])
 
     # Tab 1: Chart & trading
     with tab1:
@@ -268,33 +346,30 @@ else:
 
     # Tab 3: News
     with tab3:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.subheader("Financial News")
+        with col2:
+            max_articles = st.slider("Max articles", min_value=3, max_value=15, value=7, key="news_slider")
+        
         st.caption("Note: Yahoo finance news can be older or incomplete. Consider RSS for live feeds.")
-        st.subheader("Financial News")
-
+        
         news_list = fetch_news_yf(ticker)
         if news_list:
-            max_articles = st.slider("Max articles", min_value=3, max_value=15, value=7)
             shown = 0
             for article in news_list:
                 if shown >= max_articles:
                     break
                 try:
-                    content = article.get('content') or {}
-                    title = content.get('title') or article.get('title') or 'No Title'
-                    summary = content.get('summary') or article.get('summary') or ''
-                    link = content.get('canonicalUrl', {}).get('url') or article.get('link') or '#'
-
-                    thumbnail = content.get('thumbnail') if isinstance(content.get('thumbnail'), dict) else None
-                    image_url = None
-                    if thumbnail and 'resolutions' in thumbnail and len(thumbnail['resolutions']) > 0:
-                        image_url = thumbnail['resolutions'][0].get('url')
-
-                    published = article.get('providerPublishTime')
-                    if published:
-                        try:
-                            published_str = datetime.fromtimestamp(published).strftime('%Y-%m-%d %H:%M')
-                        except Exception:
-                            published_str = 'Unknown Date'
+                    title = article.get('title', 'No Title')
+                    summary = article.get('summary', '')
+                    link = article.get('link', '#')
+                    publisher = article.get('publisher', 'Unknown')
+                    image_url = article.get('image_url')
+                    
+                    pub_time = article.get('pub_time')
+                    if pub_time:
+                        published_str = pub_time.strftime('%Y-%m-%d %H:%M')
                     else:
                         published_str = 'Unknown Date'
 
@@ -303,7 +378,7 @@ else:
                         cols[0].image(image_url, use_container_width=True)
                     with cols[1]:
                         st.markdown(f"### [{title}]({link})")
-                        st.caption(f"📰 {article.get('publisher', 'Unknown')} | 📅 {published_str}")
+                        st.caption(f"📰 {publisher} | 📅 {published_str}")
                         if summary:
                             st.write(summary)
                     st.divider()
@@ -312,3 +387,111 @@ else:
                     st.warning(f"Skipping malformed article: {e}")
         else:
             st.info("No recent news found for this ticker.")
+    
+    # Tab 4: Trade Engine
+    with tab4:
+        st.subheader("ChronoStox Trade Engine")
+        st.caption("AI-powered trading signals and price predictions")
+        
+        if st.button("Run Analysis", use_container_width=True, type="primary"):
+            with st.spinner("Running trade engine analysis... This may take a moment."):
+                try:
+                    # Import the trade engine functions
+                    import sys
+                    import os
+                    # Get the test directory path (one level up from pages/)
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    project_root = os.path.dirname(current_dir)
+                    test_dir = os.path.join(project_root, 'test')
+                    
+                    # Add test directory to path for imports
+                    if test_dir not in sys.path:
+                        sys.path.insert(0, test_dir)
+                    
+                    # Import necessary components from local_cliv2
+                    # Note: We import the module and access functions to avoid sys.exit issues
+                    import local_cliv2 as te
+                    
+                    timer = te.Timer()
+                    
+                    # Determine data directory (test folder)
+                    data_dir = test_dir
+                    model_dir = data_dir
+                    
+                    # Load models and data
+                    # Wrap in try-except to handle sys.exit calls gracefully
+                    try:
+                        models = te.load_models(model_dir, timer)
+                        df_macro = te.load_macro(data_dir, timer)
+                        df_senti = te.load_sentiment(data_dir, timer)
+                        df_sectors = te.load_sectors(data_dir)
+                        df_raw = te.load_price(ticker, timer)
+                        close_price = float(df_raw["Close"].iloc[-1])
+                        
+                        # Feature engineering
+                        df_feat, trend_score, macro_score, vol_regime, df_full_merged = te.engineer_features(
+                            df_raw, df_macro, df_senti, df_sectors, models["features"], timer
+                        )
+                        
+                        # Prediction
+                        preds = te.predict_all(models, df_feat, df_full_merged, timer)
+                        
+                        # Risk flags
+                        sentiment_val = df_full_merged["sentiment_score"].iloc[-1] if "sentiment_score" in df_full_merged.columns else 0
+                        warnings = te.compute_risk_flags(trend_score, macro_score, vol_regime, sentiment_val, df_full_merged)
+                    except SystemExit:
+                        st.error("Trade engine encountered a fatal error. Please check that all required model files and data files are present in the test/ directory.")
+                        st.stop()
+                    
+                    # Display results
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Trend Score", f"{trend_score}/100")
+                    with col2:
+                        st.metric("Macro Score", f"{macro_score}/100")
+                    with col3:
+                        st.metric("Volatility Regime", vol_regime)
+                    
+                    st.divider()
+                    
+                    # Price targets and signals
+                    st.subheader("Price Targets & Signals")
+                    targets_data = []
+                    for i, h in enumerate(te.HORIZONS):
+                        pred_ret = float(preds["raw"][i])
+                        signal = te.classify_signal(pred_ret)
+                        conf = te.compute_confidence(pred_ret, trend_score, macro_score, vol_regime)
+                        target = float(preds["hybrid"][i])
+                        
+                        targets_data.append({
+                            "Horizon (days)": h,
+                            "Signal": signal,
+                            "Confidence": f"{conf}%",
+                            "Price Target": f"₹{target:,.2f}",
+                            "Expected Return": f"{pred_ret*100:.2f}%"
+                        })
+                    
+                    import pandas as pd
+                    targets_df = pd.DataFrame(targets_data)
+                    st.dataframe(targets_df, use_container_width=True, hide_index=True)
+                    
+                    st.divider()
+                    
+                    # Risk warnings
+                    st.subheader("Risk Flags")
+                    for warning in warnings:
+                        if "⚠" in warning:
+                            st.warning(warning)
+                        else:
+                            st.info(warning)
+                    
+                    st.divider()
+                    
+                    # Current price
+                    st.metric("Current Price", f"₹{close_price:,.2f}")
+                    
+                except Exception as e:
+                    st.error(f"Error running trade engine: {str(e)}")
+                    import traceback
+                    with st.expander("Error Details"):
+                        st.code(traceback.format_exc())

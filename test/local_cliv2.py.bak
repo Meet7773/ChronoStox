@@ -34,7 +34,7 @@ warnings.filterwarnings("ignore")
 HISTORY_DAYS = 400        # fetch extra to stabilize indicators
 MACRO_FILE = "macro_features.parquet"
 # Use the exact local filename you mentioned earlier
-SENTIMENT_FILE = "sentiment_clean.parquet"
+SENTIMENT_FILE = "ticker_sentiment_scores (1).parquet"
 SECTOR_FILE = "ticker.csv"
 MODEL_JOBLIB = "sector_model_v7_UNIVERSAL_20251113_063532.joblib"
 MODEL_KERAS = "final_lstm_20251113_124137.keras"
@@ -165,6 +165,7 @@ def load_sentiment(data_dir, timer):
 
     path = os.path.join(data_dir, SENTIMENT_FILE)
     if not os.path.exists(path):
+        # try auto-find
         try:
             candidate = auto_find_sentiment_file()
             print(f"Using detected sentiment file: {candidate}")
@@ -175,35 +176,30 @@ def load_sentiment(data_dir, timer):
 
     df_s = safe_read_parquet(path)
 
-    # ---- FIX: Force Date to datetime BEFORE anything else ----
-    if "Date" in df_s.columns:
-        df_s["Date"] = pd.to_datetime(df_s["Date"], errors="coerce")
-    else:
-        # maybe index holds the date
+    # Normalise date
+    if "Date" not in df_s.columns:
+        # maybe index-based
         if isinstance(df_s.index, pd.DatetimeIndex):
             df_s = df_s.reset_index().rename(columns={"index": "Date"})
-            df_s["Date"] = pd.to_datetime(df_s["Date"], errors="coerce")
         else:
             print("FATAL: Sentiment parquet missing 'Date' column.")
             print("Columns found:", df_s.columns)
             sys.exit(1)
 
-    # ---- REMOVE timezone ----
+    df_s["Date"] = pd.to_datetime(df_s["Date"], errors="coerce")
     df_s["Date"] = df_s["Date"].dt.tz_localize(None)
+    df_s = df_s.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
-    df_s = df_s.dropna(subset=["Date"])
-    df_s = df_s.sort_values("Date").reset_index(drop=True)
-
-    # ---- FIX: Standardise ticker column ----
+    # Standardize ticker col name
     ticker_col = None
     for c in df_s.columns:
-        if c.lower() in ["ticker", "tickeryf", "ticker_yf", "symbol"]:
+        if c.lower() in ["ticker", "tickeryf", "ticker_yf", "symbol", "stock"]:
             ticker_col = c
             break
-
     if ticker_col is None:
+        # try heuristics
         for c in df_s.columns:
-            if "ticker" in c.lower():
+            if "ticker" in c.lower() or "symbol" in c.lower():
                 ticker_col = c
                 break
 
@@ -214,28 +210,28 @@ def load_sentiment(data_dir, timer):
 
     df_s = df_s.rename(columns={ticker_col: "Ticker_YF"})
 
-    # ---- FIX: Standardise sentiment column ----
+    # Standardize sentiment_score name
     if "sentiment_score" not in df_s.columns:
+        found = None
         for c in df_s.columns:
             if "sentiment" in c.lower():
-                df_s = df_s.rename(columns={c: "sentiment_score"})
+                found = c
                 break
-
+        if found:
+            df_s = df_s.rename(columns={found: "sentiment_score"})
     if "sentiment_score" not in df_s.columns:
         print("FATAL: Sentiment file missing sentiment_score column.")
         print("Columns available:", df_s.columns)
         sys.exit(1)
 
     timer.mark("Sentiment Loading")
-
     if DEBUG_MODE:
         print("\n===== DEBUG: SENTIMENT FEATURES =====")
-        print(df_s.info())
         print(df_s.head(5))
         print(df_s.tail(5))
+        print("Sentiment columns:", df_s.columns.tolist())
 
     return df_s
-
 
 
 # ===============================================================
@@ -376,54 +372,22 @@ def engineer_features(df_price, df_macro, df_senti, df_sector, expected_cols, ti
         sys.exit(1)
 
     # Merge sentiment (per-ticker asof)
-    # ================= SENTIMENT MERGE (FINAL FIX) =================
     try:
-        df_senti_local = df_senti.copy()
-
-        # --- FIX 1: Ensure dtype(Date) = datetime64 ---
-        df_senti_local["Date"] = pd.to_datetime(
-            df_senti_local["Date"], errors="coerce"
-        )
-        df_senti_local["Date"] = df_senti_local["Date"].dt.tz_localize(None)
-        df_senti_local = df_senti_local.dropna(subset=["Date"])
-
-        # --- FIX 2: Normalize ticker format ---
-        df_senti_local["Ticker_YF"] = (
-            df_senti_local["Ticker_YF"]
-            .astype(str)
-            .str.upper()
-            .str.strip()
-        )
-
-        ticker = df["Ticker_YF"].iloc[0].upper().strip()
-
-        # filter sentiment for this ticker only
-        ssub = df_senti_local[df_senti_local["Ticker_YF"] == ticker]
-
-        # --- FIX 3: fallback: no entries for ticker → create neutral frame ---
+        # Normalize ticker column in sentiment
+        df_senti_local = df_senti.rename(columns={"Ticker_YF": "Ticker_YF"})
+        ticker = df["Ticker_YF"].iloc[0]
+        ssub = df_senti_local[df_senti_local["Ticker_YF"] == ticker].sort_values("Date")
         if ssub.empty:
-            ssub = pd.DataFrame({
-                "Date": df["Date"],
-                "sentiment_score": np.zeros(len(df))
-            })
+            # fallback: use market-wide daily sentiment if present (Date-indexed)
+            if "sentiment_score" in df_senti_local.columns and "Ticker_YF" not in df_senti_local.columns:
+                ssub = df_senti_local[["Date", "sentiment_score"]].sort_values("Date")
+            else:
+                # create empty
+                ssub = pd.DataFrame(columns=["Date", "sentiment_score"])
 
-        # --- FIX 4: asof requires sorted & datetime64 only ---
-        ssub = ssub.sort_values("Date")[["Date", "sentiment_score"]]
-        df = df.sort_values("Date")
-
-        df = pd.merge_asof(
-            df,
-            ssub,
-            on="Date",
-            direction="backward",
-            allow_exact_matches=True
-        )
-
+        df = pd.merge_asof(df, ssub[["Date", "sentiment_score"]], on="Date", direction="backward")
     except Exception as e:
         print("FATAL: Sentiment merge failed:", e)
-        print("== DEBUG INFO ==")
-        print("Price dtypes:", df.dtypes)
-        print("Senti dtypes:", df_senti_local.dtypes)
         sys.exit(1)
 
     # Sector merge
@@ -779,13 +743,13 @@ def run_prediction(ticker):
     timer = Timer()
 
     # 1) Load models
-    models = load_models("../test", timer)
+    models = load_models(".", timer)
 
     # 2) Load macro
-    df_macro = load_macro("../test", timer)
+    df_macro = load_macro(".", timer)
 
     # 3) Load sentiment
-    df_senti = load_sentiment("../test", timer)
+    df_senti = load_sentiment(".", timer)
 
     # 3.5) Load sectors
     df_sectors = load_sectors()
