@@ -208,23 +208,6 @@ if not os.path.exists(TICKER_CSV_PATH):
     st.sidebar.warning(f"Using default tickers because '{TICKER_CSV_PATH}' was not found. Place your ticker.csv at that path to use custom list.")
 
 with st.sidebar:
-    # pick ticker
-    try:
-        default_index = tickers.index(st.session_state.ticker) if st.session_state.ticker in tickers else 0
-    except Exception:
-        default_index = 0
-    st.session_state.ticker = st.selectbox("Search for a Stock", options=tickers, index=default_index)
-
-    if st.button("Fetch Data", use_container_width=True, type="primary"):
-        with st.spinner(f"Fetching data for {st.session_state.ticker}..."):
-            df = fetch_history(st.session_state.ticker, days=730)
-            if df.empty:
-                st.error("No historical data found for the selected ticker.")
-            else:
-                st.session_state.ticker_data = df
-                st.success(f"Loaded data for {st.session_state.ticker}")
-
-with st.sidebar:
     st.divider()
     portfolio = fetch_portfolio(user_id)
     if portfolio:
@@ -233,8 +216,51 @@ with st.sidebar:
         st.caption(f"Total Positions: {pos_total}")
 
 # ---------------- Main ------------------------------------------------------
+# Search bar on main page
+st.header("Live Market Analysis")
+
+# Search section
+search_col1, search_col2 = st.columns([3, 1])
+
+with search_col1:
+    # Checkbox to choose between list selection or manual input
+    use_ticker_list = st.checkbox("Select ticker from list", value=True, key="use_ticker_list")
+    
+    # pick ticker - either from list or manual input
+    if use_ticker_list:
+        try:
+            default_index = tickers.index(st.session_state.ticker) if st.session_state.ticker in tickers else 0
+        except Exception:
+            default_index = 0
+        st.session_state.ticker = st.selectbox("Search for a Stock", options=tickers, index=default_index)
+    else:
+        # Manual text input
+        manual_ticker = st.text_input(
+            "Enter Ticker Symbol",
+            value=st.session_state.get("ticker", ""),
+            placeholder="e.g., RELIANCE.NS",
+            key="manual_ticker_input"
+        )
+        if manual_ticker:
+            st.session_state.ticker = manual_ticker.strip().upper()
+
+with search_col2:
+    st.write("")  # Spacer for alignment
+    st.write("")  # Spacer for alignment
+    if st.button("Fetch Data", use_container_width=True, type="primary", key="fetch_data_main"):
+        with st.spinner(f"Fetching data for {st.session_state.ticker}..."):
+            df = fetch_history(st.session_state.ticker, days=730)
+            if df.empty:
+                st.error("No historical data found for the selected ticker.")
+            else:
+                st.session_state.ticker_data = df
+                st.success(f"Loaded data for {st.session_state.ticker}")
+                st.rerun()
+
+st.divider()
+
 if st.session_state.ticker_data.empty:
-    st.info("Search a stock in the sidebar and click 'Fetch Data' to begin.")
+    st.info("Search a stock above and click 'Fetch Data' to begin.")
 else:
     ticker = st.session_state.ticker
     df = st.session_state.ticker_data
@@ -242,7 +268,90 @@ else:
 
     st.header(f"{info.get('name', ticker)} — {ticker}")
 
+    # Initialize active tab in session state
+    if "active_tab" not in st.session_state:
+        st.session_state.active_tab = 0
+    
     tab1, tab2, tab3, tab4 = st.tabs(["Price Chart & Trading", "Key Information", "Recent News", "Trade Engine"])
+    
+    # JavaScript to maintain active tab after rerun
+    # Only inject if we need to switch to a tab other than the first one
+    if st.session_state.get("active_tab", 0) > 0:
+        tab_index = st.session_state.active_tab
+        st.markdown(f"""
+        <script>
+        (function() {{
+            function switchToTab() {{
+                // Find tab buttons - Streamlit uses specific structure
+                // Try multiple selectors to find tabs
+                let tabButtons = null;
+                
+                // Method 1: Standard Streamlit tabs
+                const tabContainer = document.querySelector('[data-testid="stTabs"]');
+                if (tabContainer) {{
+                    tabButtons = tabContainer.querySelectorAll('button[role="tab"]');
+                }}
+                
+                // Method 2: Alternative selector
+                if (!tabButtons || tabButtons.length === 0) {{
+                    tabButtons = document.querySelectorAll('button[data-baseweb="tab"]');
+                }}
+                
+                // Method 3: Find by button text or structure
+                if (!tabButtons || tabButtons.length === 0) {{
+                    const allButtons = document.querySelectorAll('button');
+                    tabButtons = Array.from(allButtons).filter(btn => 
+                        btn.getAttribute('role') === 'tab' || 
+                        btn.closest('[data-testid="stTabs"]') !== null
+                    );
+                }}
+                
+                if (tabButtons && tabButtons.length > {tab_index}) {{
+                    // Click the tab button
+                    tabButtons[{tab_index}].click();
+                    return true;
+                }}
+                return false;
+            }}
+            
+            // Wait for DOM to be ready
+            function initTabSwitch() {{
+                // Use MutationObserver to wait for tabs to be ready
+                const observer = new MutationObserver(function(mutations, obs) {{
+                    if (switchToTab()) {{
+                        obs.disconnect();
+                    }}
+                }});
+                
+                // Start observing
+                observer.observe(document.body, {{
+                    childList: true,
+                    subtree: true
+                }});
+                
+                // Also try immediately and with delays as fallback
+                if (switchToTab()) {{
+                    observer.disconnect();
+                }} else {{
+                    setTimeout(function() {{
+                        if (switchToTab()) observer.disconnect();
+                    }}, 100);
+                    setTimeout(function() {{
+                        if (switchToTab()) observer.disconnect();
+                        observer.disconnect(); // Clean up after 1 second
+                    }}, 1000);
+                }}
+            }}
+            
+            // Run when DOM is ready
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', initTabSwitch);
+            }} else {{
+                initTabSwitch();
+            }}
+        }})();
+        </script>
+        """, unsafe_allow_html=True)
 
     # Tab 1: Chart & trading
     with tab1:
@@ -393,7 +502,10 @@ else:
         st.subheader("ChronoStox Trade Engine")
         st.caption("AI-powered trading signals and price predictions")
         
-        if st.button("Run Analysis", use_container_width=True, type="primary"):
+        if st.button("Run Analysis", use_container_width=True, type="primary", key="run_analysis_btn"):
+            # Set active tab to Trade Engine (index 3) before running analysis
+            # This ensures we stay on this tab after rerun
+            st.session_state.active_tab = 3
             with st.spinner("Running trade engine analysis... This may take a moment."):
                 try:
                     # Import the trade engine functions

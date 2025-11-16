@@ -53,6 +53,70 @@ ATR_MULT = {
     252: 7.2
 }
 
+# ===============================================================
+# EXPERIMENTAL WEIGHTS / CONSTANTS (Editable)
+# ===============================================================
+GLOBAL_END_DATE = None #"2025-11-08"   # e.g., "2025-11-05"
+
+# ---- Hybrid Price Target Weights ----
+WEIGHT_ML_H = {
+    5:  0.62,
+    21: 0.55,
+    63: 0.50,                 # ML model output weight
+    126: 0.42,
+    252: 0.35
+}
+
+WEIGHT_ATR_H = {
+    h: 1 - WEIGHT_ML_H[h] for h in HORIZONS             # ATR-based band expansion weight
+}
+
+# ---- Signal Classification Thresholds ----
+SELL_THRESHOLD = -0.010    # raw predicted return < threshold → SELL
+BUY_THRESHOLD  =  0.012    # raw predicted return > threshold → BUY
+
+# ---- Confidence Score Weights ----
+CONF_WEIGHT_ML     = 0.50   # ML model contributes this much to confidence
+CONF_WEIGHT_TREND  = 0.20   # Trend score weighting
+CONF_WEIGHT_MACRO  = 0.20   # Macro score weighting
+
+# Volatility penalties applied AFTER confidence:
+VOL_PENALTY_HIGH    = 0.75  # if "High-Risk"
+VOL_PENALTY_VOLATILE = 0.88 # if "Volatile"
+
+# ---- Trend Score Rules ----
+TREND_EMA_BULL = 15
+TREND_EMA_BEAR = 3
+
+TREND_MACD_POS = 25
+TREND_MACD_NEG = 0
+
+TREND_RSI_GOOD = 12
+TREND_RSI_OVER = 10
+TREND_RSI_BAD  = 5
+
+TREND_CLOSE_STRONG = 15
+TREND_CLOSE_OK     = 10
+TREND_CLOSE_WEAK   = 5
+
+# ---- Macro Score Rules ----
+MACRO_VIX_LOW    = 20
+MACRO_VIX_MEDIUM = 12
+MACRO_VIX_HIGH   = 5
+
+MACRO_USD_GOOD = 12
+MACRO_USD_BAD  = 5
+
+MACRO_YIELD_GOOD = 12
+MACRO_YIELD_BAD  = 10
+
+MACRO_INDX_POS = 10  # per positive index
+
+# ---- Sentiment thresholds ----
+SENTIMENT_NEUTRAL = 0.02
+SENTIMENT_NEG     = -0.15
+
+
 
 # ===============================================================
 # SIMPLE TIMER (with delta tracking)
@@ -287,7 +351,22 @@ def load_sectors(data_dir=None):
 def load_price(ticker, timer):
     global DEBUG_MODE
     try:
-        df = yf.Ticker(ticker).history(period=f"{HISTORY_DAYS}d", interval="1d")
+        yf_obj = yf.Ticker(ticker)
+
+        # --- If GLOBAL_END_DATE is set, fetch HISTORY_DAYS before that date ---
+        if GLOBAL_END_DATE:
+            # Convert end date to datetime
+            end_dt = pd.to_datetime(GLOBAL_END_DATE)
+            start_dt = end_dt - pd.Timedelta(days=HISTORY_DAYS)
+
+            df = yf_obj.history(
+                start=start_dt.strftime("%Y-%m-%d"),
+                end=end_dt.strftime("%Y-%m-%d"),
+                interval="1d"
+            )
+
+        else:
+            df = yf_obj.history(period=f"{HISTORY_DAYS}d", interval="1d")
     except Exception as e:
         print(f"FATAL: Failed to fetch price data for {ticker}: {e}")
         sys.exit(1)
@@ -518,19 +597,19 @@ def compute_trend_score(df):
         ema200_col = next((c for c in df.columns if "EMA_200" in c or "EMA_200" in str(c)), None)
         if ema50_col and ema200_col:
             if latest[ema50_col] > latest[ema200_col]:
-                score += 25
+                score += TREND_EMA_BULL
             else:
                 score += 5
 
         # MACD hist
         if "MACDh_12_26_9" in latest and latest["MACDh_12_26_9"] > 0:
-            score += 25
+            score += TREND_EMA_BULL
 
         # RSI
         if "RSI_14" in latest:
             rsi = latest["RSI_14"]
             if 50 < rsi < 70:
-                score += 25
+                score += TREND_EMA_BULL
             elif rsi >= 70:
                 score += 10
             else:
@@ -540,7 +619,7 @@ def compute_trend_score(df):
         if "close_to_ema200" in latest:
             ratio = latest["close_to_ema200"]
             if ratio > 1.03:
-                score += 25
+                score += TREND_EMA_BULL
             elif ratio > 1.0:
                 score += 10
             else:
@@ -589,28 +668,36 @@ def compute_macro_score(df):
 
 
 def compute_volatility_regime(df):
+    """
+    Adaptive volatility regime classifier using ATR% (ATR / Close * 100)
+    Completely ignores ATRr_14 because it becomes corrupted after merges.
+    """
+
     try:
         latest = df.iloc[-1]
-        atrp = None
-        if "ATRr_14" in df.columns:
-            atrp = latest.get("ATRr_14", None)
-            if atrp is not None:
-                atrp = atrp * 100
-        if atrp is None:
-            if "ATR_14" in latest:
-                atrp = (latest["ATR_14"] / latest["Close"]) * 100
-        if atrp is None:
+
+        # --- Always use ATR_14 only (never ATRr_14) ---
+        if "ATR_14" not in df.columns:
             return "Normal"
 
-        if atrp < 1:
+        atr = float(latest["ATR_14"])
+        close = float(latest["Close"])
+        atrp = (atr / close) * 100 if close > 0 else 0
+
+        print("[DEBUG] ATR_14 =", atr, "| Close =", close, "| ATR% =", atrp)
+
+        # ---- FINAL ADAPTIVE THRESHOLDS ----
+        if atrp < 0.8:
             return "Calm"
-        elif atrp < 2:
+        elif atrp < 1.5:
             return "Normal"
-        elif atrp < 4:
+        elif atrp < 4.0:
             return "Volatile"
         else:
             return "High-Risk"
-    except:
+
+    except Exception as e:
+        print("[Volatility ERROR]", e)
         return "Normal"
 
 
@@ -659,7 +746,16 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
     # hybrid: 70% ML (relative returns) + 30% ATR band (absolute)
     # convert raw_pred (returns) to price: close * (1 + raw_pred)
     ml_prices = close * (1.0 + raw_pred)
-    hybrid = ml_prices * 0.70 + atr_expansion * 0.30
+    hybrid = []
+
+    for i, h in enumerate(HORIZONS):
+        w_ml = WEIGHT_ML_H[h]
+        w_atr = WEIGHT_ATR_H[h]
+
+        hybrid_price = ml_prices[i] * w_ml + atr_expansion[i] * w_atr
+        hybrid.append(hybrid_price)
+
+    hybrid = np.array(hybrid)
 
     return {
         "raw": raw_pred,
@@ -705,21 +801,28 @@ def predict_all(models, df_features, df_full_merged, timer):
 #   SIGNAL ENGINE / CONFIDENCE / RISK / REPORT (unchanged)
 # ===============================================================
 def classify_signal(pred_ret):
-    if pred_ret < -0.015:
+    if pred_ret < SELL_THRESHOLD:
         return "SELL"
-    elif pred_ret > 0.020:
+    elif pred_ret > BUY_THRESHOLD:
         return "BUY"
     else:
         return "HOLD"
 
 
 def compute_confidence(pred_ret, trend_score, macro_score, vol_regime):
-    ml_conf = min(100, abs(pred_ret) * 1600)
-    base = (ml_conf * 0.4) + (trend_score * 0.3) + (macro_score * 0.2)
+    ml_conf = np.clip(abs(pred_ret) * 950, 0, 60)
+
+    base = (
+            ml_conf * CONF_WEIGHT_ML
+            + trend_score * CONF_WEIGHT_TREND
+            + macro_score * CONF_WEIGHT_MACRO
+    )
+
     if vol_regime == "High-Risk":
-        base *= 0.55
+        base *= VOL_PENALTY_HIGH
     elif vol_regime == "Volatile":
-        base *= 0.75
+        base *= VOL_PENALTY_VOLATILE
+
     return int(min(100, base))
 
 
@@ -732,9 +835,9 @@ def compute_risk_flags(trend_score, macro_score, vol_regime, sentiment, df):
     if trend_score < 40:
         warnings.append("⚠ Weak price trend")
     if "sentiment_score" in df.columns:
-        if abs(df["sentiment_score"].iloc[-1]) < 0.02:
+        if abs(df["sentiment_score"].iloc[-1]) < SENTIMENT_NEUTRAL:
             warnings.append("⚠ Neutral sentiment (low conviction)")
-        elif df["sentiment_score"].iloc[-1] < -0.15:
+        elif df["sentiment_score"].iloc[-1] < SENTIMENT_NEG:
             warnings.append("⚠ Strong negative sentiment")
     if len(warnings) == 0:
         warnings.append("No major risk flags")

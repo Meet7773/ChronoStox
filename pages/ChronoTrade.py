@@ -126,7 +126,7 @@ def perform_simulation_trade(
         res.raise_for_status()
         st.cache_data.clear()
         st.success(res.json().get("message", f"{action.upper()} executed."))
-        st.experimental_rerun()
+        st.rerun()
     except requests.exceptions.RequestException as e:
         error_detail = "Unknown error"
         try:
@@ -144,7 +144,7 @@ def reset_simulation(user_id: str):
         res.raise_for_status()
         st.cache_data.clear()
         st.success("Simulation reset successfully.")
-        st.experimental_rerun()
+        st.rerun()
     except requests.exceptions.RequestException as e:
         error_detail = "Unknown error"
         try:
@@ -202,24 +202,45 @@ if not os.path.exists(TICKER_CSV_PATH):
     st.sidebar.warning(f"Using default tickers because '{TICKER_CSV_PATH}' was not found. Place your ticker.csv at that path to use custom list.")
 
 with st.sidebar:
-    st.header("Scenario Selection")
+    st.divider()
+    st.metric(label="Simulation Cash", value=f"₹{simulation_cash:,.2f}")
+    if st.sidebar.button("Reset Simulation", use_container_width=True):
+        reset_simulation(user_id)
 
-with st.sidebar:
-    scenario_name = st.selectbox("Choose a Historical Event", options=list(SCENARIOS.keys()))
+# ----------------------------- Main Content -----------------------------------
+st.header("ChronoTrade — Historical Scenario Trading")
+
+# Scenario Selection and Search on main page
+st.subheader("Scenario Selection")
+
+scenario_col1, scenario_col2 = st.columns([2, 1])
+
+with scenario_col1:
+    scenario_name = st.selectbox("Choose a Historical Event", options=list(SCENARIOS.keys()), key="scenario_select_main")
     scenario = SCENARIOS[scenario_name]
     st.info(scenario["description"])
 
-    use_picker = st.checkbox("Pick from list", value=True)
+with scenario_col2:
+    st.write("")  # Spacer
+
+# Ticker selection
+ticker_col1, ticker_col2, ticker_col3 = st.columns([2, 2, 1])
+
+with ticker_col1:
+    use_picker = st.checkbox("Pick from list", value=True, key="use_picker_main")
     if use_picker:
         try:
             idx = tickers.index(scenario["default_ticker"]) if scenario["default_ticker"] in tickers else 0
         except Exception:
             idx = 0
-        ticker = st.selectbox("Select a Ticker", options=tickers, index=idx)
+        ticker = st.selectbox("Select a Ticker", options=tickers, index=idx, key="ticker_select_main")
     else:
-        ticker = st.text_input("Enter a Stock Ticker", value=scenario["default_ticker"]).upper().strip()
+        ticker = st.text_input("Enter a Stock Ticker", value=scenario["default_ticker"], key="ticker_input_main").upper().strip()
 
-    if st.button("Load Scenario Data", use_container_width=True, type="primary"):
+with ticker_col2:
+    st.write("")  # Spacer
+    st.write("")  # Spacer
+    if st.button("Load Scenario Data", use_container_width=True, type="primary", key="load_scenario_main"):
         with st.spinner(f"Fetching {ticker} from {scenario['start']} to {scenario['end']}..."):
             data = fetch_history(ticker, scenario["start"], scenario["end"])
             if data.empty:
@@ -230,14 +251,13 @@ with st.sidebar:
                 st.session_state.current_ticker = ticker
                 st.session_state.current_scenario = scenario_name
                 st.success(f"Scenario loaded for {ticker}!")
+                st.rerun()
 
-with st.sidebar:
-    st.divider()
-    st.metric(label="Simulation Cash", value=f"₹{simulation_cash:,.2f}")
-    if st.sidebar.button("Reset Simulation", use_container_width=True):
-        reset_simulation(user_id)
+with ticker_col3:
+    st.write("")  # Spacer
 
-# ----------------------------- Main Content -----------------------------------
+st.divider()
+
 df = st.session_state.chrono_ticker_data
 if not df.empty and st.session_state.current_ticker:
     ticker = st.session_state.current_ticker
@@ -396,4 +416,4 @@ if not df.empty and st.session_state.current_ticker:
         st.write("Not enough data to compute benchmark.")
 
 else:
-    st.info("Select a scenario and ticker in the sidebar and click 'Load Scenario Data' to begin.")
+    st.info("Select a scenario and ticker above and click 'Load Scenario Data' to begin.")

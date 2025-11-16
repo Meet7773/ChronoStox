@@ -1,0 +1,26 @@
+{
+  "PRICE_FILE": "all_ticker_data.parquet",
+  "PRICE_FILE_TYPE": "parquet",
+
+  "MACRO_FILE": "../test/macro_features.parquet",
+  "SENTIMENT_FILE": "../test/sentiment_clean.parquet",
+
+  "TICKER_FILE": "../test/ticker.csv",
+
+  "MODEL_JOBLIB": "../test/sector_model_v7_UNIVERSAL_20251113_063532.joblib",
+  "MODEL_KERAS": "../test/final_lstm_20251113_124137.keras",
+
+  "SLIPPAGE": 0.0015,
+  "COMMISSION": 0.0009,
+
+  "POSITION_SIZE": 0.20,
+  "MAX_POSITIONS": 3,
+  "MIN_CASH_RATIO": 0.40,
+
+  "STOPLOSS": -0.08,
+  "TAKEPROFIT": 0.25,
+
+  "AUTO_DETECT_DATE_RANGE": true,
+  "START_DATE": null,
+  "END_DATE": null
+}
