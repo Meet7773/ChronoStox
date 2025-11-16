@@ -30,3 +30,4 @@ test/final_lstm_20251113_124137.keras
 test/sector_model_v7_UNIVERSAL_20251113_063532.joblib
 test/macro_features.parquet
 test/ticker_sentiment_scores (1).parquet
+ backtester/all_ticker_data.parquet
