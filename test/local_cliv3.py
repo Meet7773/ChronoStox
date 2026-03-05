@@ -1,6 +1,13 @@
 # ===============================================================
-# ChronoStox v8.4 - Hybrid Quant Engine (ATR + ML + Monte Carlo)
-# Final Polish: Explicit Return % Calculation in Report
+# ChronoStox v9.0 - Hybrid Quant Engine WITH META-LEARNER
+# Based on local_cliv2.py (v8.4) — integrates the XGBoost
+# meta-learner that was trained during CV stacking.
+#
+# KEY CHANGES vs v8.4:
+#   1. Meta-learner (XGBoost per-horizon) now used for signal
+#   2. LGBM + LSTM predictions fed to meta-learner separately
+#   3. Meta-learner probabilities drive confidence & signal
+#   4. Side-by-side report: old system vs meta-learner
 # ===============================================================
 
 import os
@@ -32,99 +39,106 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # ===============================================================
 
-HISTORY_DAYS = 400  # fetch extra to stabilize indicators
+HISTORY_DAYS = 400
 MACRO_FILE = "macro_features.parquet"
-# Use the exact local filename you mentioned earlier
 SENTIMENT_FILE = "sentiment_clean.parquet"
 SECTOR_FILE = "ticker.csv"
 MODEL_JOBLIB = "sector_model_v7_UNIVERSAL_20251113_063532.joblib"
 MODEL_KERAS = "final_lstm_20251113_124137.keras"
 
-DEBUG_MODE = False  # toggled by --debug
+DEBUG_MODE = False
 
 # Horizons
 HORIZONS = [5, 21, 63, 126, 252]
 
 # ATR multipliers for targets
 ATR_MULT = {
-    5: 2.0,
-    21: 3.2,
-    63: 4.0,
-    126: 6.5,
-    252: 9.5
+    5: 1.0,
+    21: 1.8,
+    63: 3.0,
+    126: 4.8,
+    252: 7.2
 }
 
 # ===============================================================
-# EXPERIMENTAL WEIGHTS / CONSTANTS (Editable)
+# WEIGHTS / CONSTANTS
 # ===============================================================
-# GLOBAL_END_DATE = "2025-11-08"  # "2025-11-08"   # e.g., "2025-11-05"
+GLOBAL_END_DATE = ""
 
-# ---- Hybrid Price Target Weights ----
+# Hybrid Price Target Weights
 WEIGHT_ML_H = {
-    5: 0.30,
-    21: 0.45,
-    63: 0.55,  # ML model output weight
-    126: 0.60,
-    252: 0.70
+    5: 0.62,
+    21: 0.55,
+    63: 0.50,
+    126: 0.42,
+    252: 0.35
 }
 
 WEIGHT_ATR_H = {
-    h: 1 - WEIGHT_ML_H[h] for h in HORIZONS  # ATR-based band expansion weight
+    h: 1 - WEIGHT_ML_H[h] for h in HORIZONS
 }
 
-# ---- Signal Classification Thresholds ----
-# These are now checked *after* confidence is confirmed
-SELL_THRESHOLD = -0.010  # raw predicted return < threshold → SELL
-BUY_THRESHOLD = 0.012  # raw predicted return > threshold → BUY
+# Signal Classification Thresholds (used by legacy system)
+SELL_THRESHOLD = -0.010
+BUY_THRESHOLD = 0.012
 
-# ---- Confidence Score Weights ----
-CONF_WEIGHT_ML = 0.50  # ML model contributes this much to confidence
-CONF_WEIGHT_TREND = 0.20  # Trend score weighting
-CONF_WEIGHT_MACRO = 0.20  # Macro score weighting
+# Confidence Score Weights
+CONF_WEIGHT_ML = 0.50
+CONF_WEIGHT_TREND = 0.20
+CONF_WEIGHT_MACRO = 0.20
 
-# Volatility penalties applied AFTER confidence:
-VOL_PENALTY_HIGH = 0.85  # if "High-Risk"
-VOL_PENALTY_VOLATILE = 0.92  # if "Volatile"
+# Volatility penalties
+VOL_PENALTY_HIGH = 0.75
+VOL_PENALTY_VOLATILE = 0.88
 
-# ---- Trend Score Rules ----
+# Trend Score Rules
 TREND_EMA_BULL = 15
 TREND_EMA_BEAR = 3
-
 TREND_MACD_POS = 25
 TREND_MACD_NEG = 0
-
 TREND_RSI_GOOD = 12
 TREND_RSI_OVER = 10
 TREND_RSI_BAD = 5
-
 TREND_CLOSE_STRONG = 15
 TREND_CLOSE_OK = 10
 TREND_CLOSE_WEAK = 5
 
-# ---- Macro Score Rules ----
+# Macro Score Rules
 MACRO_VIX_LOW = 20
 MACRO_VIX_MEDIUM = 12
 MACRO_VIX_HIGH = 5
-
 MACRO_USD_GOOD = 12
 MACRO_USD_BAD = 5
-
 MACRO_YIELD_GOOD = 12
 MACRO_YIELD_BAD = 10
+MACRO_INDX_POS = 10
 
-MACRO_INDX_POS = 10  # per positive index
-
-# ---- Sentiment thresholds ----
+# Sentiment thresholds
 SENTIMENT_NEUTRAL = 0.02
 SENTIMENT_NEG = -0.15
 
-# --- THIS IS THE NEW LOGIC'S CONTROL KNOB ---
-# Any signal with confidence < this value will be forced to HOLD.
-CONFIDENCE_THRESHOLD = 35  # <---- TUNE THIS VALUE
+# Confidence threshold (legacy system)
+CONFIDENCE_THRESHOLD = 35
+
+# ---------------------------------------------------------------
+# META-LEARNER CONFIG (NEW in v9.0)
+# ---------------------------------------------------------------
+# Meta-learner probability thresholds for signal classification
+# P(Buy) > this → BUY, P(Sell) > this → SELL, else HOLD
+META_BUY_PROB_THRESHOLD = 0.40
+META_SELL_PROB_THRESHOLD = 0.40
+
+# Minimum gap between winning class and second class to avoid
+# ambiguous signals (e.g., P(Buy)=0.35, P(Hold)=0.33 → too close)
+META_MIN_CONFIDENCE_GAP = 0.10
+
+# Meta-learner weight in final signal decision
+# 1.0 = fully trust meta-learner, 0.0 = fully trust legacy
+META_SIGNAL_WEIGHT = 0.70
 
 
 # ===============================================================
-# SIMPLE TIMER (with delta tracking)
+# TIMER
 # ===============================================================
 class Timer:
     def __init__(self):
@@ -155,7 +169,7 @@ def safe_read_parquet(path):
 
 
 # ===============================================================
-# LOAD MODELS (Joblib + Keras)
+# LOAD MODELS (Joblib + Keras) — now also loads meta_models
 # ===============================================================
 def load_models(model_dir, timer):
     global DEBUG_MODE
@@ -169,10 +183,12 @@ def load_models(model_dir, timer):
         print("FATAL: Error loading model files:", e)
         sys.exit(1)
 
+    meta_models = bundle.get("meta_models", {})
+
     models = {
         "scaler": bundle["scaler"],
         "lgbm": bundle["model_lgbm"],
-        "meta_models": bundle.get("meta_models", {}),
+        "meta_models": meta_models,
         "features": bundle["features"],
         "horizons": bundle["horizons"],
         "seq_len": bundle["lstm_sequence_length"],
@@ -181,12 +197,18 @@ def load_models(model_dir, timer):
 
     timer.mark("Model Loading")
 
+    # Report meta-learner status
+    if meta_models:
+        print(f"[META] ✅ Loaded {len(meta_models)} meta-learner(s) for horizons: {list(meta_models.keys())}")
+    else:
+        print("[META] ⚠ No meta-learners found in bundle — falling back to legacy signals")
+
     if DEBUG_MODE:
         print("\n===== DEBUG: MODEL INFO =====")
         print("Feature count (model bundle):", len(models["features"]))
         print("LSTM Sequence Length:", models["seq_len"])
         print("LSTM Input Shape:", lstm_model.input_shape)
-        print("Scaler mean size:", getattr(models["scaler"], "mean_", None))
+        print("Meta-models:", list(meta_models.keys()) if meta_models else "NONE")
 
     return models
 
@@ -204,7 +226,6 @@ def load_macro(data_dir, timer):
 
     df_macro = safe_read_parquet(path)
 
-    # If Date missing but index is datetime -> reset index
     if "Date" not in df_macro.columns:
         if isinstance(df_macro.index, pd.DatetimeIndex):
             df_macro = df_macro.reset_index().rename(columns={"index": "Date"})
@@ -220,7 +241,6 @@ def load_macro(data_dir, timer):
     if DEBUG_MODE:
         print("\n===== DEBUG: MACRO FEATURES =====")
         print(df_macro.head(3))
-        print(df_macro.tail(3))
         print("Macro columns:", df_macro.columns.tolist())
 
     return df_macro
@@ -239,65 +259,46 @@ def load_sentiment(data_dir, timer):
 
     df_s = safe_read_parquet(path)
 
-    # ---- FIX: Force Date to datetime BEFORE anything else ----
     if "Date" in df_s.columns:
         df_s["Date"] = pd.to_datetime(df_s["Date"], errors="coerce")
     else:
-        # maybe index holds the date
         if isinstance(df_s.index, pd.DatetimeIndex):
             df_s = df_s.reset_index().rename(columns={"index": "Date"})
             df_s["Date"] = pd.to_datetime(df_s["Date"], errors="coerce")
         else:
             print("FATAL: Sentiment parquet missing 'Date' column.")
-            print("Columns found:", df_s.columns)
             sys.exit(1)
 
-    # ---- REMOVE timezone ----
     df_s["Date"] = df_s["Date"].dt.tz_localize(None)
+    df_s = df_s.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
-    df_s = df_s.dropna(subset=["Date"])
-    df_s = df_s.sort_values("Date").reset_index(drop=True)
-
-    # ---- FIX: Standardise ticker column ----
+    # Standardise ticker column
     ticker_col = None
     for c in df_s.columns:
         if c.lower() in ["ticker", "tickeryf", "ticker_yf", "symbol"]:
             ticker_col = c
             break
-
     if ticker_col is None:
         for c in df_s.columns:
             if "ticker" in c.lower():
                 ticker_col = c
                 break
-
     if ticker_col is None:
         print("FATAL: Sentiment file missing ticker column.")
-        print("Columns available:", df_s.columns)
         sys.exit(1)
-
     df_s = df_s.rename(columns={ticker_col: "Ticker_YF"})
 
-    # ---- FIX: Standardise sentiment column ----
+    # Standardise sentiment column
     if "sentiment_score" not in df_s.columns:
         for c in df_s.columns:
             if "sentiment" in c.lower():
                 df_s = df_s.rename(columns={c: "sentiment_score"})
                 break
-
     if "sentiment_score" not in df_s.columns:
         print("FATAL: Sentiment file missing sentiment_score column.")
-        print("Columns available:", df_s.columns)
         sys.exit(1)
 
     timer.mark("Sentiment Loading")
-
-    if DEBUG_MODE:
-        print("\n===== DEBUG: SENTIMENT FEATURES =====")
-        print(df_s.info())
-        print(df_s.head(5))
-        print(df_s.tail(5))
-
     return df_s
 
 
@@ -311,11 +312,7 @@ def load_sectors(data_dir=None):
         sys.exit(1)
 
     df = pd.read_csv(path, header=None, low_memory=False)
-
-    # Attempt to discover columns from the CSV sample header (if present)
-    # If file has header row, read again with header=0
     try:
-        # re-try reading with header=0 to catch real headers
         df0 = pd.read_csv(path, low_memory=False)
         if df0.shape[1] >= 3 and any("Sector" in c or "sector" in c for c in df0.columns):
             df = df0
@@ -323,7 +320,6 @@ def load_sectors(data_dir=None):
         pass
 
     cols = df.columns.tolist()
-    # heuristics: find ticker col & sector col
     ticker_col = None
     sector_col = None
     for c in cols:
@@ -332,11 +328,9 @@ def load_sectors(data_dir=None):
         if "sector" in str(c).lower():
             sector_col = c
 
-    # fallback to positional guesses
     if ticker_col is None:
         ticker_col = cols[0]
     if sector_col is None:
-        # try third column if csv like sample
         sector_col = cols[2] if len(cols) > 2 else cols[-1]
 
     df = df.rename(columns={ticker_col: "Ticker_YF", sector_col: "Sector"})
@@ -351,19 +345,14 @@ def load_price(ticker, timer):
     global DEBUG_MODE
     try:
         yf_obj = yf.Ticker(ticker)
-
-        # --- If GLOBAL_END_DATE is set, fetch HISTORY_DAYS before that date ---
         if GLOBAL_END_DATE:
-            # Convert end date to datetime
             end_dt = pd.to_datetime(GLOBAL_END_DATE)
             start_dt = end_dt - pd.Timedelta(days=HISTORY_DAYS)
-
             df = yf_obj.history(
                 start=start_dt.strftime("%Y-%m-%d"),
                 end=end_dt.strftime("%Y-%m-%d"),
                 interval="1d"
             )
-
         else:
             df = yf_obj.history(period=f"{HISTORY_DAYS}d", interval="1d")
     except Exception as e:
@@ -377,7 +366,6 @@ def load_price(ticker, timer):
     df = df.reset_index()
     if "Date" not in df.columns:
         print("FATAL: Price dataframe missing 'Date' column.")
-        print(df.columns)
         sys.exit(1)
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -386,22 +374,18 @@ def load_price(ticker, timer):
     df["Ticker_YF"] = ticker
 
     timer.mark("Price Fetching")
-    if DEBUG_MODE:
-        print("\n===== DEBUG: PRICE DATA =====")
-        print(df.head(3))
     return df
 
 
 # ===============================================================
 # FEATURE ENGINEERING
-# returns: df_final (features in expected order), trend_score, macro_score, vol_regime, df_merged_full
 # ===============================================================
 def engineer_features(df_price, df_macro, df_senti, df_sector, expected_cols, timer):
     global DEBUG_MODE
 
     df = df_price.copy()
 
-    # TA: ADX, ATR, BBands, MACD, RSI, EMA50, EMA200
+    # TA indicators
     try:
         df.ta.adx(length=14, append=True)
         df.ta.atr(length=14, append=True)
@@ -410,13 +394,10 @@ def engineer_features(df_price, df_macro, df_senti, df_sector, expected_cols, ti
 
         bb = df.ta.bbands(length=5, append=False)
         if bb is not None and not bb.empty:
-            # pandas_ta naming convention: BBL, BBM, BBU, BBB, BBP sometimes differ; handle robustly
             if "BBB_5_2.0" in bb.columns:
                 df["BBB_5_2.0"] = bb["BBB_5_2.0"]
             else:
-                # fallback to positional
                 df["BBB_5_2.0"] = bb.iloc[:, 3]
-
             if "BBP_5_2.0" in bb.columns:
                 df["BBP_5_2.0"] = bb["BBP_5_2.0"]
             else:
@@ -424,19 +405,15 @@ def engineer_features(df_price, df_macro, df_senti, df_sector, expected_cols, ti
 
         mac = df.ta.macd(append=False)
         if mac is not None and not mac.empty:
-            # mac columns: MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
-            # keep hist and signal
             if mac.shape[1] >= 3:
                 df["MACDh_12_26_9"] = mac.iloc[:, 1]
                 df["MACDs_12_26_9"] = mac.iloc[:, 2]
 
         df.ta.rsi(append=True)
 
-        # close_to_ema200
         ema200_candidates = [c for c in df.columns if "EMA" in c and "200" in str(c)]
         if ema200_candidates:
-            ema200 = ema200_candidates[0]
-            df["close_to_ema200"] = df["Close"] / (df[ema200] + 1e-9)
+            df["close_to_ema200"] = df["Close"] / (df[ema200_candidates[0]] + 1e-9)
         else:
             df["close_to_ema200"] = np.nan
 
@@ -454,54 +431,27 @@ def engineer_features(df_price, df_macro, df_senti, df_sector, expected_cols, ti
         sys.exit(1)
 
     # Merge sentiment (per-ticker asof)
-    # ================= SENTIMENT MERGE (FINAL FIX) =================
     try:
         df_senti_local = df_senti.copy()
-
-        # --- FIX 1: Ensure dtype(Date) = datetime64 ---
-        df_senti_local["Date"] = pd.to_datetime(
-            df_senti_local["Date"], errors="coerce"
-        )
+        df_senti_local["Date"] = pd.to_datetime(df_senti_local["Date"], errors="coerce")
         df_senti_local["Date"] = df_senti_local["Date"].dt.tz_localize(None)
         df_senti_local = df_senti_local.dropna(subset=["Date"])
-
-        # --- FIX 2: Normalize ticker format ---
-        df_senti_local["Ticker_YF"] = (
-            df_senti_local["Ticker_YF"]
-            .astype(str)
-            .str.upper()
-            .str.strip()
-        )
+        df_senti_local["Ticker_YF"] = df_senti_local["Ticker_YF"].astype(str).str.upper().str.strip()
 
         ticker = df["Ticker_YF"].iloc[0].upper().strip()
-
-        # filter sentiment for this ticker only
         ssub = df_senti_local[df_senti_local["Ticker_YF"] == ticker]
 
-        # --- FIX 3: fallback: no entries for ticker → create neutral frame ---
         if ssub.empty:
             ssub = pd.DataFrame({
                 "Date": df["Date"],
                 "sentiment_score": np.zeros(len(df))
             })
 
-        # --- FIX 4: asof requires sorted & datetime64 only ---
         ssub = ssub.sort_values("Date")[["Date", "sentiment_score"]]
         df = df.sort_values("Date")
-
-        df = pd.merge_asof(
-            df,
-            ssub,
-            on="Date",
-            direction="backward",
-            allow_exact_matches=True
-        )
-
+        df = pd.merge_asof(df, ssub, on="Date", direction="backward", allow_exact_matches=True)
     except Exception as e:
         print("FATAL: Sentiment merge failed:", e)
-        print("== DEBUG INFO ==")
-        print("Price dtypes:", df.dtypes)
-        print("Senti dtypes:", df_senti_local.dtypes)
         sys.exit(1)
 
     # Sector merge
@@ -513,85 +463,55 @@ def engineer_features(df_price, df_macro, df_senti, df_sector, expected_cols, ti
         df["Sector"] = sector
 
         unique_sectors = [
-            "Communication Services",
-            "Consumer Cyclical",
-            "Consumer Defensive",
-            "Energy",
-            "Financial Services",
-            "Healthcare",
-            "Industrials",
-            "Real Estate",
-            "Technology",
-            "Utilities",
-            "nan"
+            "Communication Services", "Consumer Cyclical", "Consumer Defensive", "Energy",
+            "Financial Services", "Healthcare", "Industrials", "Real Estate",
+            "Technology", "Utilities", "nan"
         ]
-
         for s in unique_sectors:
-            cname = f"Sector_{s}"
-            df[cname] = 1.0 if sector == s else 0.0
-
+            df[f"Sector_{s}"] = 1.0 if sector == s else 0.0
     except Exception as e:
         print("FATAL: Sector merge failed:", e)
         sys.exit(1)
 
-    # sentiment x sector interactions — names MUST match trained features:
+    # Sentiment × sector interactions
     try:
         if "sentiment_score" not in df.columns:
             df["sentiment_score"] = 0.0
-
         for c in df.columns:
             if str(c).startswith("Sector_"):
-                # feature name expected in training: sentiment_x_Sector_Technology (i.e., prefix 'sentiment_x_' + full sector col)
-                interaction_name = f"sentiment_x_{c}"
-                df[interaction_name] = df[c].astype(float) * df["sentiment_score"].astype(float)
+                df[f"sentiment_x_{c}"] = df[c].astype(float) * df["sentiment_score"].astype(float)
     except Exception as e:
         print("FATAL: Interaction creation failed:", e)
         sys.exit(1)
 
-    # Final cleanup - keep numeric, fill na
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.fillna(0.0)
-
-    # ensure all expected cols exist
-    missing_cols = set(expected_cols) - set(df.columns)
-    for col in missing_cols:
+    # Cleanup
+    df = df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    for col in set(expected_cols) - set(df.columns):
         df[col] = 0.0
 
-    # reorder to expected
     try:
         df_final = df[expected_cols].copy()
     except Exception as e:
-        print("FATAL: Feature mismatch. Missing columns:", e)
-        print("Expected count:", len(expected_cols))
-        print("Available columns:", len(df.columns))
+        print("FATAL: Feature mismatch:", e)
         sys.exit(1)
 
     timer.mark("Feature Engineering")
 
-    # compute signal helpers on full merged df (not limited to features)
     trend_score = compute_trend_score(df)
     macro_score = compute_macro_score(df)
     vol_regime = compute_volatility_regime(df)
-
-    if DEBUG_MODE:
-        print("\n===== DEBUG: ENGINEERED FEATURES =====")
-        print(df_final.head(3))
-        print("Feature count:", df_final.shape[1])
-        print("Trend score:", trend_score, "Macro score:", macro_score, "Vol regime:", vol_regime)
 
     return df_final, trend_score, macro_score, vol_regime, df
 
 
 # ===============================================================
-# MARKET INTELLIGENCE ENGINES (Trend, Macro, Volatility)
-# (same as your functions with small robustness fixes)
+# MARKET INTELLIGENCE ENGINES
 # ===============================================================
 def compute_trend_score(df):
     try:
         latest = df.iloc[-1]
         score = 0
 
-        # EMA50 / EMA200
         ema50_col = next((c for c in df.columns if "EMA_50" in c or "EMA_50" in str(c)), None)
         ema200_col = next((c for c in df.columns if "EMA_200" in c or "EMA_200" in str(c)), None)
         if ema50_col and ema200_col:
@@ -600,11 +520,9 @@ def compute_trend_score(df):
             else:
                 score += 5
 
-        # MACD hist
         if "MACDh_12_26_9" in latest and latest["MACDh_12_26_9"] > 0:
             score += TREND_EMA_BULL
 
-        # RSI
         if "RSI_14" in latest:
             rsi = latest["RSI_14"]
             if 50 < rsi < 70:
@@ -614,7 +532,6 @@ def compute_trend_score(df):
             else:
                 score += 5
 
-        # close_to_ema200
         if "close_to_ema200" in latest:
             ratio = latest["close_to_ema200"]
             if ratio > 1.03:
@@ -659,134 +576,88 @@ def compute_macro_score(df):
         for col in ["SP500_log_ret", "NIKKEI_log_ret"]:
             if col in latest:
                 rb += 1 if latest[col] > 0 else 0
-
         score += rb * 15
+
         return min(100, int(score))
     except:
         return 50
 
 
 def compute_volatility_regime(df):
-    """
-    v8.2 PATCH: Robust Column Finder + Z-Score.
-    """
     if DEBUG_MODE:
         print("DEBUG: *** VOLATILITY PATCH v8.2 ACTIVE ***")
     try:
-        # 1. Smart Column Search
-        # pandas_ta sometimes outputs 'ATR_14' or 'ATRr_14'
         atr_col = None
         for c in ["ATR_14", "ATRr_14", "ATR"]:
             if c in df.columns:
                 atr_col = c
                 break
-
         if atr_col is None:
-            print("[WARN] No ATR column found! Defaulting to Normal.")
-            if DEBUG_MODE:
-                # Print first 10 cols to help debug
-                print(f"[DEBUG] Available cols: {df.columns.tolist()[:10]}")
             return "Normal"
 
-        # 2. Get the history of ATR% (Volatility)
         atr_series = df[atr_col]
         close_series = df["Close"]
-
         atr_pct_series = (atr_series / close_series) * 100
         atr_pct_series = atr_pct_series.dropna()
 
         if len(atr_pct_series) < 30:
-            if DEBUG_MODE:
-                print(f"[WARN] Not enough ATR data ({len(atr_pct_series)} rows).")
             return "Normal"
 
-        # 3. Calculate Z-Score
         current_atrp = atr_pct_series.iloc[-1]
         mean_atrp = atr_pct_series.mean()
         std_atrp = atr_pct_series.std()
 
-        if std_atrp == 0:
-            z_score = 0
-        else:
-            z_score = (current_atrp - mean_atrp) / std_atrp
+        z_score = (current_atrp - mean_atrp) / std_atrp if std_atrp != 0 else 0
 
-        if DEBUG_MODE:
-            print(
-                f"[DEBUG] Volatility Z-Score: {z_score:.2f} (Curr: {current_atrp:.2f}%, Mean: {mean_atrp:.2f}%) using col: {atr_col}")
-
-        # 4. Dynamic Classification
         if z_score > 2.0:
             return "High-Risk"
         elif z_score > 1.0:
             return "Volatile"
         elif z_score < -1.0:
             return "Calm"
-        else:
-            return "Normal"
+        return "Normal"
 
     except Exception as e:
-        print(f"[Volatility ERROR] {e}")
         return "Normal"
 
 
 # ===============================================================
-# MONTE CARLO ENGINE (New in v8.4)
+# MONTE CARLO ENGINE
 # ===============================================================
 class MonteCarloEngine:
     def __init__(self, num_sims=5000):
         self.num_sims = num_sims
 
     def run_simulation(self, current_price, volatility_daily, drift_daily, horizon_days):
-        """
-        Runs Geometric Brownian Motion (GBM) simulations.
-        Returns: (min_bound, max_bound) for the given confidence interval (1st/99th percentile).
-        """
         if horizon_days <= 0:
             return current_price, current_price
 
-        # Random component (Brownian Motion)
         Z = np.random.normal(0, 1, self.num_sims)
-
-        # GBM Formula: S_t = S_0 * exp((mu - 0.5 * sigma^2)t + sigma * sqrt(t) * Z)
-        # drift_daily is the expected daily return (mu)
         term1 = (drift_daily - 0.5 * volatility_daily ** 2) * horizon_days
         term2 = volatility_daily * np.sqrt(horizon_days) * Z
-
         simulated_prices = current_price * np.exp(term1 + term2)
 
-        # Guardrails: 1st to 99th percentile (covers 98% of outcomes)
-        lower_bound = np.percentile(simulated_prices, 1)
-        upper_bound = np.percentile(simulated_prices, 99)
-
-        return lower_bound, upper_bound
+        return np.percentile(simulated_prices, 1), np.percentile(simulated_prices, 99)
 
     def validate_prediction(self, lstm_target, current_price, vol_annual, drift_annual, horizon_days):
-        """
-        Checks if the LSTM target is statistically possible.
-        """
-        # Convert annual metrics to daily
         vol_daily = vol_annual / np.sqrt(252)
-
-        # Conservative Drift: Use 50% of historical drift to avoid projecting bull runs forever
-        # If historical drift is negative, keep it negative.
-        drift_daily = (drift_annual / 252) * 1.0
-
+        drift_daily = (drift_annual / 252) * 0.5
         low, high = self.run_simulation(current_price, vol_daily, drift_daily, horizon_days)
 
         if lstm_target > high:
             return False, f"Hallucination (Target {lstm_target:.2f} > MC Max {high:.2f})", high
         elif lstm_target < low:
             return False, f"Crash Overshoot (Target {lstm_target:.2f} < MC Min {low:.2f})", low
-
         return True, "Valid", lstm_target
 
 
 # ===============================================================
-# PRICE TARGET ENGINE (ATR + ML Hybrid + Monte Carlo)
+# PRICE TARGET ENGINE (v9.0 — returns raw preds separately)
 # ===============================================================
 def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, feature_order):
     """
-    v8.4: Syncs Price Engine with ATRr_14 + Monte Carlo Guardrails
+    v9.0: Returns raw LGBM and LSTM predictions SEPARATELY
+    so the meta-learner can use them.
     """
     close = float(df_full["Close"].iloc[-1])
 
@@ -803,10 +674,13 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
         else:
             raw_lstm = np.zeros_like(raw_lgb)
 
-        raw_pred = (raw_lgb + raw_lstm) / 2.0
+        # Legacy average (still used for price targets)
+        raw_avg = (raw_lgb + raw_lstm) / 2.0
     except Exception as e:
         print("WARN: model prediction failed:", e)
-        raw_pred = np.zeros(len(HORIZONS))
+        raw_lgb = np.zeros(len(HORIZONS))
+        raw_lstm = np.zeros(len(HORIZONS))
+        raw_avg = np.zeros(len(HORIZONS))
 
     # --- ATR Band Block ---
     atr_col = None
@@ -814,37 +688,29 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
         if c in df_full.columns:
             atr_col = c
             break
+    atr = float(df_full[atr_col].iloc[-1]) if atr_col else close * 0.01
 
-    if atr_col:
-        atr = float(df_full[atr_col].iloc[-1])
-    else:
-        atr = close * 0.01  # Fallback
-
-    # Calculate Volatility Factor
+    # Volatility
     vol_factor = atr / close
-
-    # Calculate Annualized Volatility and Drift for Monte Carlo
-    # Approx annual volatility = daily_vol * sqrt(252)
     vol_annual = vol_factor * np.sqrt(252)
 
-    # Calculate Drift (Log Return Mean over last 252 days)
-    # This gives the "Trend Bias" for the Monte Carlo sim
     try:
         log_returns = np.log(df_full["Close"] / df_full["Close"].shift(1))
         drift_annual = log_returns.tail(252).mean() * 252
-        if np.isnan(drift_annual): drift_annual = 0.0
+        if np.isnan(drift_annual):
+            drift_annual = 0.0
     except:
         drift_annual = 0.0
 
-    # --- MONTE CARLO ENGINE INIT ---
+    # Monte Carlo
     mc_engine = MonteCarloEngine()
     mc_notes = []
 
-    # --- HYBRID + CLAMPING BLOCK ---
+    # Hybrid + Clamping
     atr_mult = np.array([ATR_MULT[h] for h in HORIZONS])
     atr_expansion = close + (atr * atr_mult)
 
-    ml_prices = close * (1.0 + raw_pred)
+    ml_prices = close * (1.0 + raw_avg)
     hybrid = []
 
     for i, h in enumerate(HORIZONS):
@@ -852,21 +718,17 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
         w_atr = WEIGHT_ATR_H[h]
         raw_hybrid = ml_prices[i] * w_ml + atr_expansion[i] * w_atr
 
-        # 1. Beta Clamp (Physics Check)
-        # FIX: Increased multiplier from 2.0 to 3.5
-        max_move_pct = vol_factor * np.sqrt(h) * 3.5
+        # Beta Clamp
+        max_move_pct = vol_factor * np.sqrt(h) * 2.0
         max_price = close * (1 + max_move_pct)
         min_price = close * (1 - max_move_pct)
         clamped_price = max(min_price, min(max_price, raw_hybrid))
 
-        # 2. Monte Carlo Guardrail (Probability Check)
+        # Monte Carlo Guardrail
         is_valid, msg, safe_limit = mc_engine.validate_prediction(
             clamped_price, close, vol_annual, drift_annual, h
         )
-
         if not is_valid:
-            # If invalid, we clamp to the Monte Carlo limit
-            # This stops the model from predicting statistically impossible prices
             clamped_price = safe_limit
             mc_notes.append(msg)
 
@@ -874,9 +736,10 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
 
     hybrid = np.array(hybrid)
 
-    # Return notes for reporting
     return {
-        "raw": raw_pred,
+        "raw_lgb": raw_lgb,       # NEW: separate LGBM predictions
+        "raw_lstm": raw_lstm,     # NEW: separate LSTM predictions
+        "raw_avg": raw_avg,       # legacy average
         "atr": atr_expansion,
         "hybrid": hybrid,
         "mc_notes": mc_notes
@@ -884,7 +747,84 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
 
 
 # ===============================================================
-# PREDICTION WRAPPER (LGBM + LSTM -> price targets)
+# META-LEARNER SIGNAL ENGINE (NEW in v9.0)
+# ===============================================================
+def apply_meta_learner(meta_models, raw_lgb, raw_lstm, horizons):
+    """
+    Feeds raw LGBM + LSTM predictions to the per-horizon
+    XGBoost meta-learner classifiers.
+
+    Returns per-horizon:
+      - meta_signal: "BUY" / "SELL" / "HOLD"
+      - meta_confidence: 0-100
+      - meta_proba: [P(Sell), P(Hold), P(Buy)]
+    """
+    results = {}
+
+    for i, h in enumerate(horizons):
+        if h not in meta_models:
+            results[h] = {
+                "signal": "HOLD",
+                "confidence": 0,
+                "proba": [0.0, 1.0, 0.0],
+                "available": False
+            }
+            continue
+
+        model = meta_models[h]
+
+        # Build meta-feature vector: [lgbm_pred_h, lstm_pred_h]
+        X_meta = np.array([[raw_lgb[i], raw_lstm[i]]], dtype=np.float32)
+
+        try:
+            proba = model.predict_proba(X_meta)[0]  # [P(Sell), P(Hold), P(Buy)]
+            pred_class = model.predict(X_meta)[0]    # 0=Sell, 1=Hold, 2=Buy
+        except Exception as e:
+            if DEBUG_MODE:
+                print(f"[META] Error for {h}d horizon: {e}")
+            results[h] = {
+                "signal": "HOLD",
+                "confidence": 0,
+                "proba": [0.0, 1.0, 0.0],
+                "available": False
+            }
+            continue
+
+        p_sell, p_hold, p_buy = proba[0], proba[1], proba[2]
+
+        # Determine signal from probabilities
+        sorted_proba = sorted(enumerate(proba), key=lambda x: -x[1])
+        best_class, best_prob = sorted_proba[0]
+        second_prob = sorted_proba[1][1]
+        gap = best_prob - second_prob
+
+        # Signal classification with confidence gap check
+        if gap < META_MIN_CONFIDENCE_GAP:
+            # Too ambiguous — default to HOLD
+            signal = "HOLD"
+        elif best_class == 2 and p_buy >= META_BUY_PROB_THRESHOLD:
+            signal = "BUY"
+        elif best_class == 0 and p_sell >= META_SELL_PROB_THRESHOLD:
+            signal = "SELL"
+        else:
+            signal = "HOLD"
+
+        # Confidence: based on how dominant the winning class is
+        # Scale from 0-100: max confidence when one class has ~100%
+        confidence = int(min(100, best_prob * 100))
+
+        results[h] = {
+            "signal": signal,
+            "confidence": confidence,
+            "proba": [round(p_sell, 3), round(p_hold, 3), round(p_buy, 3)],
+            "available": True
+        }
+
+    return results
+
+
+# ===============================================================
+# PREDICTION WRAPPER
 # ===============================================================
 def predict_all(models, df_features, df_full_merged, timer):
     seq_len = models["seq_len"]
@@ -905,140 +845,202 @@ def predict_all(models, df_features, df_full_merged, timer):
     preds = compute_price_targets(df_full_merged, model_lgb, model_lstm, scaler, seq_len, feature_order)
 
     timer.mark("Prediction")
-    if DEBUG_MODE:
-        print("\n===== DEBUG: RAW MODEL OUTPUTS =====")
-        print("Raw preds (returns):", preds["raw"])
-        print("Hybrid:", preds["hybrid"])
 
+    # Apply meta-learner
+    meta_results = {}
+    if models["meta_models"]:
+        meta_results = apply_meta_learner(
+            models["meta_models"],
+            preds["raw_lgb"],
+            preds["raw_lstm"],
+            HORIZONS
+        )
+        timer.mark("Meta-Learner")
+
+    preds["meta"] = meta_results
     return preds
 
 
 # ===============================================================
-#   SIGNAL ENGINE / CONFIDENCE / RISK / REPORT (FIXED LOGIC)
+# LEGACY SIGNAL ENGINE (kept for comparison)
 # ===============================================================
-# This section has been rewritten to fix the logic bug.
-# 1. We compute confidence FIRST.
-# 2. We use confidence to *determine* the final signal (overruling weak signals).
-# ===============================================================
-
-def compute_final_confidence(pred_ret, trend_score, macro_score, vol_regime, horizon_days):
-    # Annualize the return to compare apples to apples
-    # 2.2% in 5 days = ~110% annualized.
-    annualized_ret = abs(pred_ret) * (252 / max(1, horizon_days))
-
-    # Cap at 0.80 (80% annualized) to prevent infinite scoring on glitches
-    score_metric = min(0.80, annualized_ret)
-
-    # SCALING:
-    # If annualized return is 40% (0.40), we want ~50 points of confidence from ML.
-    # 0.40 * 125 = 50.
-    ml_conf = np.clip(score_metric * 125, 0, 65)  # Cap contribution at 65
-
+def compute_final_confidence(pred_ret, trend_score, macro_score, vol_regime):
+    ml_conf = np.clip(abs(pred_ret) * 950, 0, 60)
     base = (
-            ml_conf * CONF_WEIGHT_ML
-            + trend_score * CONF_WEIGHT_TREND
-            + macro_score * CONF_WEIGHT_MACRO
+        ml_conf * CONF_WEIGHT_ML
+        + trend_score * CONF_WEIGHT_TREND
+        + macro_score * CONF_WEIGHT_MACRO
     )
-
     if vol_regime == "High-Risk":
         base *= VOL_PENALTY_HIGH
     elif vol_regime == "Volatile":
         base *= VOL_PENALTY_VOLATILE
-
     return int(min(100, base))
 
 
-def classify_signal_from_confidence(pred_ret, confidence_score, conf_threshold=55):
-    """
-    This is the new, critical decision function.
-    It checks confidence BEFORE it checks the signal direction.
-    """
-
-    # 1. THE MOST IMPORTANT CHECK:
-    # If confidence is below our threshold, the *only* signal is HOLD.
-    # This immediately kills all "BUY 26%" or "SELL 30%" signals.
+def classify_signal_legacy(pred_ret, confidence_score, conf_threshold=35):
     if confidence_score < conf_threshold:
         return "HOLD"
-
-    # 2. ONLY IF CONFIDENCE IS HIGH...
-    # ...do we then check the *direction* of the trade based on thresholds.
     if pred_ret < SELL_THRESHOLD:
         return "SELL"
     elif pred_ret > BUY_THRESHOLD:
         return "BUY"
-    else:
-        # If confidence is high but the return is in the neutral zone,
-        # it's still a HOLD (a high-confidence HOLD).
-        return "HOLD"
+    return "HOLD"
 
 
 def compute_risk_flags(trend_score, macro_score, vol_regime, sentiment, df):
-    # This function is unchanged, just moved here.
-    warnings = []
+    warnings_list = []
     if vol_regime == "High-Risk":
-        warnings.append("⚠ Market volatility extremely high")
+        warnings_list.append("⚠ Market volatility extremely high")
     if macro_score < 40:
-        warnings.append("⚠ Macro headwinds detected")
+        warnings_list.append("⚠ Macro headwinds detected")
     if trend_score < 40:
-        warnings.append("⚠ Weak price trend")
+        warnings_list.append("⚠ Weak price trend")
     if "sentiment_score" in df.columns:
         if abs(df["sentiment_score"].iloc[-1]) < SENTIMENT_NEUTRAL:
-            warnings.append("⚠ Neutral sentiment (low conviction)")
+            warnings_list.append("⚠ Neutral sentiment (low conviction)")
         elif df["sentiment_score"].iloc[-1] < SENTIMENT_NEG:
-            warnings.append("⚠ Strong negative sentiment")
-    if len(warnings) == 0:
-        warnings.append("No major risk flags")
-    return warnings
+            warnings_list.append("⚠ Strong negative sentiment")
+    if len(warnings_list) == 0:
+        warnings_list.append("No major risk flags")
+    return warnings_list
 
 
+# ===============================================================
+# COMBINED SIGNAL (v9.0 — blends legacy + meta-learner)
+# ===============================================================
+def compute_combined_signal(legacy_signal, legacy_conf, meta_result, vol_regime):
+    """
+    Blends legacy rule-based signal with meta-learner output.
+
+    Logic:
+    - If meta-learner is available and confident, prefer it
+    - If meta-learner agrees with legacy, boost confidence
+    - If they disagree, use the one with higher confidence
+    - Apply vol penalty to final confidence
+    """
+    if not meta_result.get("available", False):
+        return legacy_signal, legacy_conf, "legacy-only"
+
+    meta_signal = meta_result["signal"]
+    meta_conf = meta_result["confidence"]
+
+    # Agreement boost
+    if legacy_signal == meta_signal:
+        # Both agree → high confidence
+        combined_conf = int(min(100, max(legacy_conf, meta_conf) * 1.15))
+        return meta_signal, combined_conf, "agreed"
+
+    # Disagreement → weighted decision
+    meta_weight = META_SIGNAL_WEIGHT
+    legacy_weight = 1.0 - meta_weight
+
+    meta_score = meta_conf * meta_weight
+    legacy_score = legacy_conf * legacy_weight
+
+    if meta_score >= legacy_score:
+        # Meta wins
+        combined_conf = int(min(100, meta_conf * 0.9))  # slight penalty for disagreement
+        return meta_signal, combined_conf, "meta-override"
+    else:
+        # Legacy wins
+        combined_conf = int(min(100, legacy_conf * 0.9))
+        return legacy_signal, combined_conf, "legacy-override"
+
+
+# ===============================================================
+# REPORT (v9.0 — shows meta-learner, legacy, and combined)
+# ===============================================================
 def print_report(ticker, close, preds, trend, macro, vol, risk, timer):
-    print("========================================")
-    print(f"ChronoStox v8.4 Quant Signal Report")
-    print(f"Ticker       : {ticker}")
-    print(f"Generated    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Last Close   : {close:.2f}")
-    print("----------------------------------------")
-    print(f"Trend Score  : {trend}/100")
-    print(f"Macro Score  : {macro}/100")
-    print(f"Vol Regime   : {vol}")
-    print("----------------------------------------")
-    print(f"Model Latency: {timer.delta('Prediction'):.4f}s")
-    print("----------------------------------------")
-    # Updated header to include RETURN %
-    print(f"{'HORIZON':<8} | {'SIGNAL':<6} | {'CONF':<5} | {'TARGET':<10} | {'RETURN':<8}")
-    print("----------------------------------------")
+    has_meta = bool(preds.get("meta", {}))
 
+    print("=" * 70)
+    print(f"  ChronoStox v9.0 Quant Signal Report (Meta-Learner Edition)")
+    print("=" * 70)
+    print(f"  Ticker       : {ticker}")
+    print(f"  Generated    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Last Close   : ₹{close:.2f}")
+    print("-" * 70)
+    print(f"  Trend Score  : {trend}/100")
+    print(f"  Macro Score  : {macro}/100")
+    print(f"  Vol Regime   : {vol}")
+    print(f"  Model Latency: {timer.delta('Prediction'):.4f}s")
+    if has_meta:
+        print(f"  Meta Latency : {timer.delta('Meta-Learner'):.4f}s")
+    print("-" * 70)
 
-    # --- ------------------------------------ ---
+    # Header
+    if has_meta:
+        print(f"{'HRZ':<5} | {'COMBINED':<8} | {'CONF':<5} | {'TARGET':<10} | {'RET':<8} | {'META':<6} | {'P(S/H/B)':<18} | {'LEGACY':<6} | {'SRC'}")
+        print("-" * 100)
+    else:
+        print(f"{'HRZ':<5} | {'SIGNAL':<8} | {'CONF':<5} | {'TARGET':<10} | {'RET':<8}")
+        print("-" * 55)
 
     for i, h in enumerate(HORIZONS):
         target_price = preds["hybrid"][i]
-
-        # Calculate Safe Return % based on the Final Clamped Target
         safe_return_pct = (target_price - close) / close
 
-        # 1. Calculate confidence FIRST based on the SAFE return
-        conf = compute_final_confidence(safe_return_pct, trend, macro, vol, h)
+        # Legacy signal
+        legacy_conf = compute_final_confidence(safe_return_pct, trend, macro, vol)
+        legacy_signal = classify_signal_legacy(safe_return_pct, legacy_conf, CONFIDENCE_THRESHOLD)
 
-        # 2. Use confidence to DETERMINE the final signal
-        signal = classify_signal_from_confidence(safe_return_pct, conf, conf_threshold=CONFIDENCE_THRESHOLD)
+        if has_meta and h in preds["meta"]:
+            meta_result = preds["meta"][h]
 
-        # 3. Print results with Explicit Return %
-        print(f"{str(h).ljust(8)} | {signal.ljust(6)} | {str(conf).ljust(5)} | {target_price:.2f}".ljust(
-            33) + f" | {safe_return_pct * 100:+.2f}%")
+            # Combined signal
+            combined_signal, combined_conf, source = compute_combined_signal(
+                legacy_signal, legacy_conf, meta_result, vol
+            )
 
-    print("----------------------------------------")
+            proba = meta_result["proba"]
+            proba_str = f"{proba[0]:.2f}/{proba[1]:.2f}/{proba[2]:.2f}"
+            meta_sig = meta_result["signal"]
+
+            print(
+                f"{str(h).ljust(5)} | "
+                f"{combined_signal.ljust(8)} | "
+                f"{str(combined_conf).ljust(5)} | "
+                f"₹{target_price:<9.2f} | "
+                f"{safe_return_pct * 100:+6.2f}% | "
+                f"{meta_sig.ljust(6)} | "
+                f"{proba_str.ljust(18)} | "
+                f"{legacy_signal.ljust(6)} | "
+                f"{source}"
+            )
+        else:
+            print(
+                f"{str(h).ljust(5)} | "
+                f"{legacy_signal.ljust(8)} | "
+                f"{str(legacy_conf).ljust(5)} | "
+                f"₹{target_price:<9.2f} | "
+                f"{safe_return_pct * 100:+6.2f}%"
+            )
+
+    print("-" * (100 if has_meta else 55))
+
+    # Risk flags
     print("RISK FLAGS:")
     for r in risk:
-        print(" -", r)
+        print(f"  - {r}")
 
-    # Print MC Notes if any
+    # MC Notes
     if preds["mc_notes"]:
         print("MONTE CARLO ALERTS:")
         for note in preds["mc_notes"]:
-            print(f" - {note}")
+            print(f"  - {note}")
 
-    print("========================================")
+    # Meta-learner debug
+    if has_meta and DEBUG_MODE:
+        print("\n===== META-LEARNER RAW DEBUG =====")
+        print(f"  Raw LGBM preds : {preds['raw_lgb']}")
+        print(f"  Raw LSTM preds : {preds['raw_lstm']}")
+        for h in HORIZONS:
+            if h in preds["meta"]:
+                m = preds["meta"][h]
+                print(f"  {h}d: signal={m['signal']}, conf={m['confidence']}, proba={m['proba']}")
+
+    print("=" * 70)
 
 
 # ===============================================================
@@ -1048,90 +1050,63 @@ def run_prediction(ticker):
     global DEBUG_MODE
     timer = Timer()
 
-    # 1) Load models
-    # ASSUMING models are in a relative dir '../test'
-    # You may need to change "../test" to "." if your models are in the same dir
+    # Load models
     model_dir = "."
-    try:
-        # Check current dir
-        if os.path.exists(os.path.join(".", MODEL_JOBLIB)):
-            model_dir = "."
-        # Check parent/test dir
-        elif os.path.exists(os.path.join("../test", MODEL_JOBLIB)):
-            model_dir = "../test"
-        else:
-            print(f"FATAL: Cannot find model files in '.' or '../test'")
-            sys.exit(1)
-
-        models = load_models(model_dir, timer)
-    except Exception as e:
-        print(f"FATAL: Error during model loading from '{model_dir}'. {e}")
+    if os.path.exists(os.path.join(".", MODEL_JOBLIB)):
+        model_dir = "."
+    elif os.path.exists(os.path.join("../test", MODEL_JOBLIB)):
+        model_dir = "../test"
+    else:
+        print(f"FATAL: Cannot find model files in '.' or '../test'")
         sys.exit(1)
 
-    # 2) Load macro
-    # ASSUMING data is in the same dir or '../test'
-    data_dir = model_dir  # Use the same logic as models
+    models = load_models(model_dir, timer)
+
+    # Load data
+    data_dir = model_dir
     df_macro = load_macro(data_dir, timer)
-
-    # 3) Load sentiment
     df_senti = load_sentiment(data_dir, timer)
-
-    # 3.5) Load sectors
-    df_sectors = load_sectors(data_dir)  # Use data_dir
-
-    # 4) Load price
+    df_sectors = load_sectors(data_dir)
     df_raw = load_price(ticker, timer)
     close_price = float(df_raw["Close"].iloc[-1])
 
-    # 5) Feature engineering
+    # Feature engineering
     df_feat, trend_score, macro_score, vol_regime, df_full_merged = engineer_features(
-        df_raw,
-        df_macro,
-        df_senti,
-        df_sectors,
-        models["features"],
-        timer
+        df_raw, df_macro, df_senti, df_sectors, models["features"], timer
     )
 
-    # 6) Prediction
+    # Prediction (includes meta-learner)
     preds = predict_all(models, df_feat, df_full_merged, timer)
 
-    # 7) Risk Flags
-    warnings = compute_risk_flags(
-        trend_score,
-        macro_score,
-        vol_regime,
+    # Risk flags
+    risk_warnings = compute_risk_flags(
+        trend_score, macro_score, vol_regime,
         df_full_merged["sentiment_score"].iloc[-1] if "sentiment_score" in df_full_merged.columns else 0,
         df_full_merged
     )
 
-    # 8) Output
+    # Report
     print_report(
-        ticker,
-        close_price,
-        preds,
-        trend_score,
-        macro_score,
-        vol_regime,
-        warnings,
-        timer
+        ticker, close_price, preds,
+        trend_score, macro_score, vol_regime,
+        risk_warnings, timer
     )
 
 
 # ===============================================================
-# COMMAND LINE INTERFACE
+# CLI
 # ===============================================================
 def main():
     global DEBUG_MODE
-    parser = argparse.ArgumentParser(description="ChronoStox v8.4 CLI (Monte Carlo Edition)")
+    parser = argparse.ArgumentParser(description="ChronoStox v9.0 CLI (Meta-Learner Edition)")
     parser.add_argument("ticker", type=str, help="Ticker symbol (e.g., RELIANCE.NS)")
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
     args = parser.parse_args()
 
     DEBUG_MODE = args.debug
 
-    print(f"\n[ChronoStox v8.4] Initializing for: {args.ticker.upper()}")
-    print("========================================")
+    print(f"\n[ChronoStox v9.0] Initializing for: {args.ticker.upper()}")
+    print("=" * 70)
 
     try:
         run_prediction(args.ticker.upper())

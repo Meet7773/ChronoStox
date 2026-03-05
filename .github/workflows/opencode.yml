@@ -31,4 +31,5 @@ jobs:
           GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
-          model: google/gemini-2.5-flash
+          # Default router for general queries
+          model: kimik/kimik-chat

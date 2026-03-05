@@ -48,7 +48,7 @@ def fit_hmm(df, n_components=3):
     print(f"[+] Training HMM with {n_components} hidden states...", file=sys.stderr)
 
     # n_iter=10000 for convergence
-    model = GaussianHMM(n_components=n_components, covariance_type="full", n_iter=10000, random_state=42)
+    model = GaussianHMM(n_components=n_components, covariance_type="full", n_iter=10000, random_state=420)
     model.fit(X_train)
 
     df["state"] = model.predict(X_train)
