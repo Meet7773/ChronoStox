@@ -1,6 +1,6 @@
 # ===============================================================
-# ChronoStox v8 - Hybrid Quant Engine (ATR + ML Model C)
-# Full CLI Version - corrected & self-contained
+# ChronoStox v8.4 - Hybrid Quant Engine (ATR + ML + Monte Carlo)
+# Final Polish: Explicit Return % Calculation in Report
 # ===============================================================
 
 import os
@@ -20,6 +20,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 try:
     import tensorflow as tf
     from tensorflow.keras.models import load_model
+
     tf.get_logger().setLevel("ERROR")
 except Exception as e:
     print("FATAL: TensorFlow load error:", e)
@@ -31,7 +32,7 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # ===============================================================
 
-HISTORY_DAYS = 400        # fetch extra to stabilize indicators
+HISTORY_DAYS = 400  # fetch extra to stabilize indicators
 MACRO_FILE = "macro_features.parquet"
 # Use the exact local filename you mentioned earlier
 SENTIMENT_FILE = "sentiment_clean.parquet"
@@ -39,16 +40,16 @@ SECTOR_FILE = "ticker.csv"
 MODEL_JOBLIB = "sector_model_v7_UNIVERSAL_20251113_063532.joblib"
 MODEL_KERAS = "final_lstm_20251113_124137.keras"
 
-DEBUG_MODE = False   # toggled by --debug
+DEBUG_MODE = False  # toggled by --debug
 
 # Horizons
 HORIZONS = [5, 21, 63, 126, 252]
 
 # ATR multipliers for targets
 ATR_MULT = {
-    5:   1.0,
-    21:  1.8,
-    63:  3.0,
+    5: 1.0,
+    21: 1.8,
+    63: 3.0,
     126: 4.8,
     252: 7.2
 }
@@ -56,33 +57,34 @@ ATR_MULT = {
 # ===============================================================
 # EXPERIMENTAL WEIGHTS / CONSTANTS (Editable)
 # ===============================================================
-GLOBAL_END_DATE = None #"2025-11-08"   # e.g., "2025-11-05"
+GLOBAL_END_DATE = "" # "2025-11-08"   # e.g., "2025-11-05"
 
 # ---- Hybrid Price Target Weights ----
 WEIGHT_ML_H = {
-    5:  0.62,
+    5: 0.62,
     21: 0.55,
-    63: 0.50,                 # ML model output weight
+    63: 0.50,  # ML model output weight
     126: 0.42,
     252: 0.35
 }
 
 WEIGHT_ATR_H = {
-    h: 1 - WEIGHT_ML_H[h] for h in HORIZONS             # ATR-based band expansion weight
+    h: 1 - WEIGHT_ML_H[h] for h in HORIZONS  # ATR-based band expansion weight
 }
 
 # ---- Signal Classification Thresholds ----
-SELL_THRESHOLD = -0.010    # raw predicted return < threshold → SELL
-BUY_THRESHOLD  =  0.012    # raw predicted return > threshold → BUY
+# These are now checked *after* confidence is confirmed
+SELL_THRESHOLD = -0.010  # raw predicted return < threshold → SELL
+BUY_THRESHOLD = 0.012  # raw predicted return > threshold → BUY
 
 # ---- Confidence Score Weights ----
-CONF_WEIGHT_ML     = 0.50   # ML model contributes this much to confidence
-CONF_WEIGHT_TREND  = 0.20   # Trend score weighting
-CONF_WEIGHT_MACRO  = 0.20   # Macro score weighting
+CONF_WEIGHT_ML = 0.50  # ML model contributes this much to confidence
+CONF_WEIGHT_TREND = 0.20  # Trend score weighting
+CONF_WEIGHT_MACRO = 0.20  # Macro score weighting
 
 # Volatility penalties applied AFTER confidence:
-VOL_PENALTY_HIGH    = 0.75  # if "High-Risk"
-VOL_PENALTY_VOLATILE = 0.88 # if "Volatile"
+VOL_PENALTY_HIGH = 0.75  # if "High-Risk"
+VOL_PENALTY_VOLATILE = 0.88  # if "Volatile"
 
 # ---- Trend Score Rules ----
 TREND_EMA_BULL = 15
@@ -93,29 +95,32 @@ TREND_MACD_NEG = 0
 
 TREND_RSI_GOOD = 12
 TREND_RSI_OVER = 10
-TREND_RSI_BAD  = 5
+TREND_RSI_BAD = 5
 
 TREND_CLOSE_STRONG = 15
-TREND_CLOSE_OK     = 10
-TREND_CLOSE_WEAK   = 5
+TREND_CLOSE_OK = 10
+TREND_CLOSE_WEAK = 5
 
 # ---- Macro Score Rules ----
-MACRO_VIX_LOW    = 20
+MACRO_VIX_LOW = 20
 MACRO_VIX_MEDIUM = 12
-MACRO_VIX_HIGH   = 5
+MACRO_VIX_HIGH = 5
 
 MACRO_USD_GOOD = 12
-MACRO_USD_BAD  = 5
+MACRO_USD_BAD = 5
 
 MACRO_YIELD_GOOD = 12
-MACRO_YIELD_BAD  = 10
+MACRO_YIELD_BAD = 10
 
 MACRO_INDX_POS = 10  # per positive index
 
 # ---- Sentiment thresholds ----
 SENTIMENT_NEUTRAL = 0.02
-SENTIMENT_NEG     = -0.15
+SENTIMENT_NEG = -0.15
 
+# --- THIS IS THE NEW LOGIC'S CONTROL KNOB ---
+# Any signal with confidence < this value will be forced to HOLD.
+CONFIDENCE_THRESHOLD = 35  # <---- TUNE THIS VALUE
 
 
 # ===============================================================
@@ -229,13 +234,8 @@ def load_sentiment(data_dir, timer):
 
     path = os.path.join(data_dir, SENTIMENT_FILE)
     if not os.path.exists(path):
-        try:
-            candidate = auto_find_sentiment_file()
-            print(f"Using detected sentiment file: {candidate}")
-            path = candidate
-        except Exception:
-            print(f"FATAL: Sentiment file '{path}' not found.")
-            sys.exit(1)
+        print(f"FATAL: Sentiment file '{path}' not found.")
+        sys.exit(1)
 
     df_s = safe_read_parquet(path)
 
@@ -299,7 +299,6 @@ def load_sentiment(data_dir, timer):
         print(df_s.tail(5))
 
     return df_s
-
 
 
 # ===============================================================
@@ -669,57 +668,134 @@ def compute_macro_score(df):
 
 def compute_volatility_regime(df):
     """
-    Adaptive volatility regime classifier using ATR% (ATR / Close * 100)
-    Completely ignores ATRr_14 because it becomes corrupted after merges.
+    v8.2 PATCH: Robust Column Finder + Z-Score.
     """
-
+    if DEBUG_MODE:
+        print("DEBUG: *** VOLATILITY PATCH v8.2 ACTIVE ***")
     try:
-        latest = df.iloc[-1]
+        # 1. Smart Column Search
+        # pandas_ta sometimes outputs 'ATR_14' or 'ATRr_14'
+        atr_col = None
+        for c in ["ATR_14", "ATRr_14", "ATR"]:
+            if c in df.columns:
+                atr_col = c
+                break
 
-        # --- Always use ATR_14 only (never ATRr_14) ---
-        if "ATR_14" not in df.columns:
+        if atr_col is None:
+            print("[WARN] No ATR column found! Defaulting to Normal.")
+            if DEBUG_MODE:
+                # Print first 10 cols to help debug
+                print(f"[DEBUG] Available cols: {df.columns.tolist()[:10]}")
             return "Normal"
 
-        atr = float(latest["ATR_14"])
-        close = float(latest["Close"])
-        atrp = (atr / close) * 100 if close > 0 else 0
+        # 2. Get the history of ATR% (Volatility)
+        atr_series = df[atr_col]
+        close_series = df["Close"]
 
-        print("[DEBUG] ATR_14 =", atr, "| Close =", close, "| ATR% =", atrp)
+        atr_pct_series = (atr_series / close_series) * 100
+        atr_pct_series = atr_pct_series.dropna()
 
-        # ---- FINAL ADAPTIVE THRESHOLDS ----
-        if atrp < 0.8:
-            return "Calm"
-        elif atrp < 1.5:
+        if len(atr_pct_series) < 30:
+            if DEBUG_MODE:
+                print(f"[WARN] Not enough ATR data ({len(atr_pct_series)} rows).")
             return "Normal"
-        elif atrp < 4.0:
-            return "Volatile"
+
+        # 3. Calculate Z-Score
+        current_atrp = atr_pct_series.iloc[-1]
+        mean_atrp = atr_pct_series.mean()
+        std_atrp = atr_pct_series.std()
+
+        if std_atrp == 0:
+            z_score = 0
         else:
+            z_score = (current_atrp - mean_atrp) / std_atrp
+
+        if DEBUG_MODE:
+            print(
+                f"[DEBUG] Volatility Z-Score: {z_score:.2f} (Curr: {current_atrp:.2f}%, Mean: {mean_atrp:.2f}%) using col: {atr_col}")
+
+        # 4. Dynamic Classification
+        if z_score > 2.0:
             return "High-Risk"
+        elif z_score > 1.0:
+            return "Volatile"
+        elif z_score < -1.0:
+            return "Calm"
+        else:
+            return "Normal"
 
     except Exception as e:
-        print("[Volatility ERROR]", e)
+        print(f"[Volatility ERROR] {e}")
         return "Normal"
 
 
 # ===============================================================
-# PRICE TARGET ENGINE (ATR + ML Hybrid)
+# MONTE CARLO ENGINE (New in v8.4)
+# ===============================================================
+class MonteCarloEngine:
+    def __init__(self, num_sims=5000):
+        self.num_sims = num_sims
+
+    def run_simulation(self, current_price, volatility_daily, drift_daily, horizon_days):
+        """
+        Runs Geometric Brownian Motion (GBM) simulations.
+        Returns: (min_bound, max_bound) for the given confidence interval (1st/99th percentile).
+        """
+        if horizon_days <= 0:
+            return current_price, current_price
+
+        # Random component (Brownian Motion)
+        Z = np.random.normal(0, 1, self.num_sims)
+
+        # GBM Formula: S_t = S_0 * exp((mu - 0.5 * sigma^2)t + sigma * sqrt(t) * Z)
+        # drift_daily is the expected daily return (mu)
+        term1 = (drift_daily - 0.5 * volatility_daily ** 2) * horizon_days
+        term2 = volatility_daily * np.sqrt(horizon_days) * Z
+
+        simulated_prices = current_price * np.exp(term1 + term2)
+
+        # Guardrails: 1st to 99th percentile (covers 98% of outcomes)
+        lower_bound = np.percentile(simulated_prices, 1)
+        upper_bound = np.percentile(simulated_prices, 99)
+
+        return lower_bound, upper_bound
+
+    def validate_prediction(self, lstm_target, current_price, vol_annual, drift_annual, horizon_days):
+        """
+        Checks if the LSTM target is statistically possible.
+        """
+        # Convert annual metrics to daily
+        vol_daily = vol_annual / np.sqrt(252)
+
+        # Conservative Drift: Use 50% of historical drift to avoid projecting bull runs forever
+        # If historical drift is negative, keep it negative.
+        drift_daily = (drift_annual / 252) * 0.5
+
+        low, high = self.run_simulation(current_price, vol_daily, drift_daily, horizon_days)
+
+        if lstm_target > high:
+            return False, f"Hallucination (Target {lstm_target:.2f} > MC Max {high:.2f})", high
+        elif lstm_target < low:
+            return False, f"Crash Overshoot (Target {lstm_target:.2f} < MC Min {low:.2f})", low
+
+        return True, "Valid", lstm_target
+
+
+# ===============================================================
+# PRICE TARGET ENGINE (ATR + ML Hybrid + Monte Carlo)
 # ===============================================================
 def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, feature_order):
     """
-    df_full: full merged df (with Close & ATR & feature cols)
-    feature_order: list of expected feature column names in the same order as scaler/model
+    v8.4: Syncs Price Engine with ATRr_14 + Monte Carlo Guardrails
     """
     close = float(df_full["Close"].iloc[-1])
 
-    # ML raw preds
+    # --- ML Prediction Block ---
     try:
         X_row = df_full[feature_order].iloc[-1].values.astype(np.float32).reshape(1, -1)
         Xs = scaler.transform(X_row)
-
-        # LGBM
         raw_lgb = model_lgb.predict(Xs)[0]
 
-        # LSTM
         if len(df_full) >= seq_len:
             seq_df = df_full[feature_order].tail(seq_len).values.astype(np.float32)
             lstm_in = seq_df.reshape(1, seq_len, -1)
@@ -728,39 +804,81 @@ def compute_price_targets(df_full, model_lgb, model_lstm, scaler, seq_len, featu
             raw_lstm = np.zeros_like(raw_lgb)
 
         raw_pred = (raw_lgb + raw_lstm) / 2.0
-
     except Exception as e:
         print("WARN: model prediction failed:", e)
         raw_pred = np.zeros(len(HORIZONS))
 
-    # ATR bands (use ATR_14 if available)
-    try:
-        atr = float(df_full["ATR_14"].iloc[-1]) if "ATR_14" in df_full.columns else (close * 0.01)
-    except:
-        atr = close * 0.01
+    # --- ATR Band Block ---
+    atr_col = None
+    for c in ["ATR_14", "ATRr_14", "ATR"]:
+        if c in df_full.columns:
+            atr_col = c
+            break
 
-    # multiplier vector
+    if atr_col:
+        atr = float(df_full[atr_col].iloc[-1])
+    else:
+        atr = close * 0.01  # Fallback
+
+    # Calculate Volatility Factor
+    vol_factor = atr / close
+
+    # Calculate Annualized Volatility and Drift for Monte Carlo
+    # Approx annual volatility = daily_vol * sqrt(252)
+    vol_annual = vol_factor * np.sqrt(252)
+
+    # Calculate Drift (Log Return Mean over last 252 days)
+    # This gives the "Trend Bias" for the Monte Carlo sim
+    try:
+        log_returns = np.log(df_full["Close"] / df_full["Close"].shift(1))
+        drift_annual = log_returns.tail(252).mean() * 252
+        if np.isnan(drift_annual): drift_annual = 0.0
+    except:
+        drift_annual = 0.0
+
+    # --- MONTE CARLO ENGINE INIT ---
+    mc_engine = MonteCarloEngine()
+    mc_notes = []
+
+    # --- HYBRID + CLAMPING BLOCK ---
     atr_mult = np.array([ATR_MULT[h] for h in HORIZONS])
     atr_expansion = close + (atr * atr_mult)
 
-    # hybrid: 70% ML (relative returns) + 30% ATR band (absolute)
-    # convert raw_pred (returns) to price: close * (1 + raw_pred)
     ml_prices = close * (1.0 + raw_pred)
     hybrid = []
 
     for i, h in enumerate(HORIZONS):
         w_ml = WEIGHT_ML_H[h]
         w_atr = WEIGHT_ATR_H[h]
+        raw_hybrid = ml_prices[i] * w_ml + atr_expansion[i] * w_atr
 
-        hybrid_price = ml_prices[i] * w_ml + atr_expansion[i] * w_atr
-        hybrid.append(hybrid_price)
+        # 1. Beta Clamp (Physics Check)
+        max_move_pct = vol_factor * np.sqrt(h) * 2.0
+        max_price = close * (1 + max_move_pct)
+        min_price = close * (1 - max_move_pct)
+        clamped_price = max(min_price, min(max_price, raw_hybrid))
+
+        # 2. Monte Carlo Guardrail (Probability Check)
+        is_valid, msg, safe_limit = mc_engine.validate_prediction(
+            clamped_price, close, vol_annual, drift_annual, h
+        )
+
+        if not is_valid:
+            # If invalid, we clamp to the Monte Carlo limit
+            # This stops the model from predicting statistically impossible prices
+            clamped_price = safe_limit
+            mc_notes.append(msg)
+
+        hybrid.append(clamped_price)
 
     hybrid = np.array(hybrid)
 
+    # Return notes for reporting
     return {
         "raw": raw_pred,
         "atr": atr_expansion,
-        "hybrid": hybrid
+        "hybrid": hybrid,
+        "mc_notes": mc_notes
     }
 
 
@@ -774,9 +892,7 @@ def predict_all(models, df_features, df_full_merged, timer):
     model_lstm = models["lstm"]
     feature_order = models["features"]
 
-    # sanity
     if df_features.shape[1] != len(feature_order):
-        # if mismatch, attempt to reorder columns
         try:
             df_features = df_features[feature_order]
         except Exception:
@@ -791,33 +907,36 @@ def predict_all(models, df_features, df_full_merged, timer):
     if DEBUG_MODE:
         print("\n===== DEBUG: RAW MODEL OUTPUTS =====")
         print("Raw preds (returns):", preds["raw"])
-        print("ATR bands:", preds["atr"])
         print("Hybrid:", preds["hybrid"])
 
     return preds
 
 
 # ===============================================================
-#   SIGNAL ENGINE / CONFIDENCE / RISK / REPORT (unchanged)
+#   SIGNAL ENGINE / CONFIDENCE / RISK / REPORT (FIXED LOGIC)
 # ===============================================================
-def classify_signal(pred_ret):
-    if pred_ret < SELL_THRESHOLD:
-        return "SELL"
-    elif pred_ret > BUY_THRESHOLD:
-        return "BUY"
-    else:
-        return "HOLD"
+# This section has been rewritten to fix the logic bug.
+# 1. We compute confidence FIRST.
+# 2. We use confidence to *determine* the final signal (overruling weak signals).
+# ===============================================================
 
-
-def compute_confidence(pred_ret, trend_score, macro_score, vol_regime):
+def compute_final_confidence(pred_ret, trend_score, macro_score, vol_regime):
+    """
+    This is your *exact* compute_confidence function.
+    Its only job is to return the final confidence *number*.
+    """
+    # Calculate confidence component from the ML model's raw prediction
+    # The more extreme the prediction (positive or negative), the higher the base confidence
     ml_conf = np.clip(abs(pred_ret) * 950, 0, 60)
 
+    # Combine ML confidence with Trend and Macro scores
     base = (
             ml_conf * CONF_WEIGHT_ML
             + trend_score * CONF_WEIGHT_TREND
             + macro_score * CONF_WEIGHT_MACRO
     )
 
+    # Apply penalties based on the volatility regime
     if vol_regime == "High-Risk":
         base *= VOL_PENALTY_HIGH
     elif vol_regime == "Volatile":
@@ -826,7 +945,32 @@ def compute_confidence(pred_ret, trend_score, macro_score, vol_regime):
     return int(min(100, base))
 
 
+def classify_signal_from_confidence(pred_ret, confidence_score, conf_threshold=55):
+    """
+    This is the new, critical decision function.
+    It checks confidence BEFORE it checks the signal direction.
+    """
+
+    # 1. THE MOST IMPORTANT CHECK:
+    # If confidence is below our threshold, the *only* signal is HOLD.
+    # This immediately kills all "BUY 26%" or "SELL 30%" signals.
+    if confidence_score < conf_threshold:
+        return "HOLD"
+
+    # 2. ONLY IF CONFIDENCE IS HIGH...
+    # ...do we then check the *direction* of the trade based on thresholds.
+    if pred_ret < SELL_THRESHOLD:
+        return "SELL"
+    elif pred_ret > BUY_THRESHOLD:
+        return "BUY"
+    else:
+        # If confidence is high but the return is in the neutral zone,
+        # it's still a HOLD (a high-confidence HOLD).
+        return "HOLD"
+
+
 def compute_risk_flags(trend_score, macro_score, vol_regime, sentiment, df):
+    # This function is unchanged, just moved here.
     warnings = []
     if vol_regime == "High-Risk":
         warnings.append("⚠ Market volatility extremely high")
@@ -844,33 +988,53 @@ def compute_risk_flags(trend_score, macro_score, vol_regime, sentiment, df):
     return warnings
 
 
-def print_report(ticker, close_price, preds, trend_score, macro_score, vol_regime, warnings, timer):
+def print_report(ticker, close, preds, trend, macro, vol, risk, timer):
     print("========================================")
-    print(f"ChronoStox v8 Quant Signal Report")
+    print(f"ChronoStox v8.4 Quant Signal Report")
     print(f"Ticker       : {ticker}")
     print(f"Generated    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Last Close   : {close_price:.2f}")
+    print(f"Last Close   : {close:.2f}")
     print("----------------------------------------")
-    print(f"Trend Score  : {trend_score}/100")
-    print(f"Macro Score  : {macro_score}/100")
-    print(f"Vol Regime   : {vol_regime}")
+    print(f"Trend Score  : {trend}/100")
+    print(f"Macro Score  : {macro}/100")
+    print(f"Vol Regime   : {vol}")
     print("----------------------------------------")
     print(f"Model Latency: {timer.delta('Prediction'):.4f}s")
     print("----------------------------------------")
-    print("HORIZON | SIGNAL | CONFIDENCE | PRICE TARGET")
+    # Updated header to include RETURN %
+    print(f"{'HORIZON':<8} | {'SIGNAL':<6} | {'CONF':<5} | {'TARGET':<10} | {'RETURN':<8}")
     print("----------------------------------------")
 
+
+    # --- ------------------------------------ ---
+
     for i, h in enumerate(HORIZONS):
-        pred = float(preds["raw"][i])
-        signal = classify_signal(pred)
-        conf = compute_confidence(pred, trend_score, macro_score, vol_regime)
-        target = float(preds["hybrid"][i])
-        print(f"{str(h).ljust(8)} | {signal.ljust(6)} | {str(conf).ljust(10)} | {target:.2f}")
+        target_price = preds["hybrid"][i]
+
+        # Calculate Safe Return % based on the Final Clamped Target
+        safe_return_pct = (target_price - close) / close
+
+        # 1. Calculate confidence FIRST based on the SAFE return
+        conf = compute_final_confidence(safe_return_pct, trend, macro, vol)
+
+        # 2. Use confidence to DETERMINE the final signal
+        signal = classify_signal_from_confidence(safe_return_pct, conf, conf_threshold=CONFIDENCE_THRESHOLD)
+
+        # 3. Print results with Explicit Return %
+        print(f"{str(h).ljust(8)} | {signal.ljust(6)} | {str(conf).ljust(5)} | {target_price:.2f}".ljust(
+            33) + f" | {safe_return_pct * 100:+.2f}%")
 
     print("----------------------------------------")
     print("RISK FLAGS:")
-    for w in warnings:
-        print(" -", w)
+    for r in risk:
+        print(" -", r)
+
+    # Print MC Notes if any
+    if preds["mc_notes"]:
+        print("MONTE CARLO ALERTS:")
+        for note in preds["mc_notes"]:
+            print(f" - {note}")
+
     print("========================================")
 
 
@@ -882,16 +1046,35 @@ def run_prediction(ticker):
     timer = Timer()
 
     # 1) Load models
-    models = load_models("../test", timer)
+    # ASSUMING models are in a relative dir '../test'
+    # You may need to change "../test" to "." if your models are in the same dir
+    model_dir = "."
+    try:
+        # Check current dir
+        if os.path.exists(os.path.join(".", MODEL_JOBLIB)):
+            model_dir = "."
+        # Check parent/test dir
+        elif os.path.exists(os.path.join("../test", MODEL_JOBLIB)):
+            model_dir = "../test"
+        else:
+            print(f"FATAL: Cannot find model files in '.' or '../test'")
+            sys.exit(1)
+
+        models = load_models(model_dir, timer)
+    except Exception as e:
+        print(f"FATAL: Error during model loading from '{model_dir}'. {e}")
+        sys.exit(1)
 
     # 2) Load macro
-    df_macro = load_macro("../test", timer)
+    # ASSUMING data is in the same dir or '../test'
+    data_dir = model_dir  # Use the same logic as models
+    df_macro = load_macro(data_dir, timer)
 
     # 3) Load sentiment
-    df_senti = load_sentiment("../test", timer)
+    df_senti = load_sentiment(data_dir, timer)
 
     # 3.5) Load sectors
-    df_sectors = load_sectors()
+    df_sectors = load_sectors(data_dir)  # Use data_dir
 
     # 4) Load price
     df_raw = load_price(ticker, timer)
@@ -937,14 +1120,14 @@ def run_prediction(ticker):
 # ===============================================================
 def main():
     global DEBUG_MODE
-    parser = argparse.ArgumentParser(description="ChronoStox v8 CLI")
+    parser = argparse.ArgumentParser(description="ChronoStox v8.4 CLI (Monte Carlo Edition)")
     parser.add_argument("ticker", type=str, help="Ticker symbol (e.g., RELIANCE.NS)")
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
     args = parser.parse_args()
 
     DEBUG_MODE = args.debug
 
-    print(f"\n[ChronoStox v8] Initializing for: {args.ticker.upper()}")
+    print(f"\n[ChronoStox v8.4] Initializing for: {args.ticker.upper()}")
     print("========================================")
 
     try:

@@ -1,0 +1,16 @@
+// Authentication Logic
+digraph {
+	rankdir=TB
+	Start [label=Start shape=oval]
+	Hash [label="Hash Input Password" shape=box]
+	Check [label="Hash == Stored Hash?" shape=diamond]
+	True [label="Return Hashed Text" shape=parallelogram]
+	False [label="Return False" shape=parallelogram]
+	End [label=End shape=oval]
+	Start -> Hash
+	Hash -> Check
+	Check -> True [label=" Yes"]
+	Check -> False [label=" No"]
+	True -> End
+	False -> End
+}

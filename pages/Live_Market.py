@@ -72,7 +72,7 @@ def fetch_history(ticker: str, days: int = 365) -> pd.DataFrame:
         # Calculate start date
         end = datetime.now()
         start = end - timedelta(days=days)
-        
+
         # Fetch from API
         res = requests.get(
             f"{API_URL}/history/{ticker}",
@@ -80,10 +80,10 @@ def fetch_history(ticker: str, days: int = 365) -> pd.DataFrame:
         )
         res.raise_for_status()
         data = res.json()
-        
+
         if not data:
             return pd.DataFrame()
-        
+
         # Convert to DataFrame
         df = pd.DataFrame(data)
         if "time" in df.columns:
@@ -91,7 +91,7 @@ def fetch_history(ticker: str, days: int = 365) -> pd.DataFrame:
             df.set_index("Date", inplace=True)
             df = df[["open", "high", "low", "close", "volume"]]
             df.columns = ["Open", "High", "Low", "Close", "Volume"]
-        
+
         return df
     except Exception:
         return pd.DataFrame()
@@ -112,34 +112,34 @@ def fetch_news_yf(ticker: str):
     try:
         import yfinance as yf
         from datetime import timezone
-        
+
         ticker_obj = yf.Ticker(ticker)
         news = ticker_obj.news
-        
+
         if not news:
             return []
-        
+
         # Process news items similar to test/news.py
         processed_news = []
         for item in news:
             content = item.get("content", {})
-            
+
             # Extract title
             title = content.get('title') or item.get('title', 'No Title')
-            
+
             # Extract summary
             summary = content.get('summary') or item.get('summary', '')
-            
+
             # Extract link
             link = None
             if isinstance(content.get('canonicalUrl'), dict):
                 link = content.get('canonicalUrl', {}).get('url')
             if not link:
                 link = item.get('link', '#')
-            
+
             # Extract publisher
             publisher = item.get('publisher', 'Unknown')
-            
+
             # Extract publish time (similar to news.py logic)
             pub_time = None
             if "providerPublishTime" in item:
@@ -147,7 +147,7 @@ def fetch_news_yf(ticker: str):
                     pub_time = datetime.fromtimestamp(item["providerPublishTime"], tz=timezone.utc)
                 except Exception:
                     pass
-            
+
             if pub_time is None:
                 pub_date_str = content.get("pubDate")
                 if pub_date_str:
@@ -155,13 +155,13 @@ def fetch_news_yf(ticker: str):
                         pub_time = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
                     except:
                         pass
-            
+
             # Extract thumbnail
             thumbnail = content.get('thumbnail') if isinstance(content.get('thumbnail'), dict) else None
             image_url = None
             if thumbnail and 'resolutions' in thumbnail and len(thumbnail['resolutions']) > 0:
                 image_url = thumbnail['resolutions'][0].get('url')
-            
+
             processed_news.append({
                 'title': title,
                 'summary': summary,
@@ -173,7 +173,7 @@ def fetch_news_yf(ticker: str):
                 'content': content,
                 'raw': item
             })
-        
+
         return processed_news
     except Exception as e:
         st.warning(f"Error fetching news: {e}")
@@ -225,7 +225,7 @@ search_col1, search_col2 = st.columns([3, 1])
 with search_col1:
     # Checkbox to choose between list selection or manual input
     use_ticker_list = st.checkbox("Select ticker from list", value=True, key="use_ticker_list")
-    
+
     # pick ticker - either from list or manual input
     if use_ticker_list:
         try:
@@ -271,9 +271,9 @@ else:
     # Initialize active tab in session state
     if "active_tab" not in st.session_state:
         st.session_state.active_tab = 0
-    
+
     tab1, tab2, tab3, tab4 = st.tabs(["Price Chart & Trading", "Key Information", "Recent News", "Trade Engine"])
-    
+
     # JavaScript to maintain active tab after rerun
     # Only inject if we need to switch to a tab other than the first one
     if st.session_state.get("active_tab", 0) > 0:
@@ -460,9 +460,9 @@ else:
             st.subheader("Financial News")
         with col2:
             max_articles = st.slider("Max articles", min_value=3, max_value=15, value=7, key="news_slider")
-        
+
         st.caption("Note: Yahoo finance news can be older or incomplete. Consider RSS for live feeds.")
-        
+
         news_list = fetch_news_yf(ticker)
         if news_list:
             shown = 0
@@ -475,7 +475,7 @@ else:
                     link = article.get('link', '#')
                     publisher = article.get('publisher', 'Unknown')
                     image_url = article.get('image_url')
-                    
+
                     pub_time = article.get('pub_time')
                     if pub_time:
                         published_str = pub_time.strftime('%Y-%m-%d %H:%M')
@@ -496,12 +496,12 @@ else:
                     st.warning(f"Skipping malformed article: {e}")
         else:
             st.info("No recent news found for this ticker.")
-    
+
     # Tab 4: Trade Engine
     with tab4:
         st.subheader("ChronoStox Trade Engine")
         st.caption("AI-powered trading signals and price predictions")
-        
+
         if st.button("Run Analysis", use_container_width=True, type="primary", key="run_analysis_btn"):
             # Set active tab to Trade Engine (index 3) before running analysis
             # This ensures we stay on this tab after rerun
@@ -515,21 +515,21 @@ else:
                     current_dir = os.path.dirname(os.path.abspath(__file__))
                     project_root = os.path.dirname(current_dir)
                     test_dir = os.path.join(project_root, 'test')
-                    
+
                     # Add test directory to path for imports
                     if test_dir not in sys.path:
                         sys.path.insert(0, test_dir)
-                    
+
                     # Import necessary components from local_cliv2
                     # Note: We import the module and access functions to avoid sys.exit issues
                     import local_cliv2 as te
-                    
+
                     timer = te.Timer()
-                    
+
                     # Determine data directory (test folder)
                     data_dir = test_dir
                     model_dir = data_dir
-                    
+
                     # Load models and data
                     # Wrap in try-except to handle sys.exit calls gracefully
                     try:
@@ -539,22 +539,22 @@ else:
                         df_sectors = te.load_sectors(data_dir)
                         df_raw = te.load_price(ticker, timer)
                         close_price = float(df_raw["Close"].iloc[-1])
-                        
+
                         # Feature engineering
                         df_feat, trend_score, macro_score, vol_regime, df_full_merged = te.engineer_features(
                             df_raw, df_macro, df_senti, df_sectors, models["features"], timer
                         )
-                        
+
                         # Prediction
                         preds = te.predict_all(models, df_feat, df_full_merged, timer)
-                        
+
                         # Risk flags
                         sentiment_val = df_full_merged["sentiment_score"].iloc[-1] if "sentiment_score" in df_full_merged.columns else 0
                         warnings = te.compute_risk_flags(trend_score, macro_score, vol_regime, sentiment_val, df_full_merged)
                     except SystemExit:
                         st.error("Trade engine encountered a fatal error. Please check that all required model files and data files are present in the test/ directory.")
                         st.stop()
-                    
+
                     # Display results
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -563,32 +563,45 @@ else:
                         st.metric("Macro Score", f"{macro_score}/100")
                     with col3:
                         st.metric("Volatility Regime", vol_regime)
-                    
+
                     st.divider()
-                    
+
                     # Price targets and signals
                     st.subheader("Price Targets & Signals")
                     targets_data = []
+                    # --- THIS IS THE NEW LOGIC'S CONTROL KNOB ---
+                    # Any signal with confidence < this value will be forced to HOLD.
+                    CONFIDENCE_THRESHOLD = 35  # <---- TUNE THIS VALUE
+                    # --- ------------------------------------ ---
+
                     for i, h in enumerate(te.HORIZONS):
-                        pred_ret = float(preds["raw"][i])
-                        signal = te.classify_signal(pred_ret)
-                        conf = te.compute_confidence(pred_ret, trend_score, macro_score, vol_regime)
+                        # pred_ret = float(preds["raw"][i]) <-- OLD BUGGY LINE
                         target = float(preds["hybrid"][i])
-                        
+
+                        # NEW: Calculate return based on the SAFE clamped target
+                        safe_return_pct = (target - close_price) / close_price
+
+                        # 1. Calculate confidence FIRST (using safe return)
+                        conf = te.compute_final_confidence(safe_return_pct, trend_score, macro_score, vol_regime)
+
+                        # 2. Use confidence to DETERMINE the final signal
+                        signal = te.classify_signal_from_confidence(safe_return_pct, conf,
+                                                                    conf_threshold=CONFIDENCE_THRESHOLD)
+
                         targets_data.append({
                             "Horizon (days)": h,
                             "Signal": signal,
                             "Confidence": f"{conf}%",
                             "Price Target": f"₹{target:,.2f}",
-                            "Expected Return": f"{pred_ret*100:.2f}%"
+                            "Expected Return": f"{safe_return_pct * 100:+.2f}%"  # Changed to safe_return_pct
                         })
-                    
+
                     import pandas as pd
                     targets_df = pd.DataFrame(targets_data)
                     st.dataframe(targets_df, use_container_width=True, hide_index=True)
-                    
+
                     st.divider()
-                    
+
                     # Risk warnings
                     st.subheader("Risk Flags")
                     for warning in warnings:
@@ -596,12 +609,12 @@ else:
                             st.warning(warning)
                         else:
                             st.info(warning)
-                    
+
                     st.divider()
-                    
+
                     # Current price
                     st.metric("Current Price", f"₹{close_price:,.2f}")
-                    
+
                 except Exception as e:
                     st.error(f"Error running trade engine: {str(e)}")
                     import traceback
