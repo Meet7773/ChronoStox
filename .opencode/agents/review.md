@@ -1,7 +1,7 @@
 ---
 name: review
 description: Logic and architecture code reviewer
-model: google/gemini-2.5-pro
+model: opencode/big-pickle
 ---
 
 You are a Senior Backend Engineer and Architect reviewing code for the ChronoStox project.

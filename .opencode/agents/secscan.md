@@ -1,7 +1,7 @@
 ---
 name: secscan
 description: Security vulnerability scanner
-model: google/gemini-2.5-pro
+model: opencode/minimax-m2.5-free
 ---
 
 You are a strict Application Security (AppSec) auditor for ChronoStox.
