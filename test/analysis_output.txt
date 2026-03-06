@@ -1,0 +1,149 @@
+================================================================================
+  CHRONOSTOX BACKTEST DEEP ANALYSIS
+================================================================================
+  Total predictions: 690
+  Tickers: 46
+  Date range: 2025-11-21 → 2026-02-27
+
+================================================================================
+  1. ADAPTIVE WEIGHT BEHAVIOR
+================================================================================
+  LightGBM weight  — Mean: 0.4950  Min: 0.3098  Max: 0.7852  Std: 0.0425
+  LSTM weight      — Mean: 0.5050  Min: 0.2148  Max: 0.6902  Std: 0.0425
+  Unique weight combinations: 507
+
+  Weight evolution over time:
+  Date         | LGB Weight | LSTM Weight
+  ----------------------------------------
+  2025-11-21   |     0.5000 |      0.5000
+  2025-11-28   |     0.5000 |      0.5000
+  2025-12-05   |     0.5000 |      0.5000
+  2025-12-12   |     0.5000 |      0.5000
+  2025-12-19   |     0.5117 |      0.4883
+  2025-12-26   |     0.5109 |      0.4891
+  2026-01-02   |     0.5040 |      0.4960
+  2026-01-09   |     0.5000 |      0.5000
+  2026-01-16   |     0.4994 |      0.5006
+  2026-01-23   |     0.4951 |      0.5049
+  2026-01-30   |     0.4760 |      0.5240
+  2026-02-06   |     0.4796 |      0.5204
+  2026-02-13   |     0.4840 |      0.5160
+  2026-02-20   |     0.4836 |      0.5164
+  2026-02-27   |     0.4808 |      0.5192
+
+================================================================================
+  2. MODEL ACCURACY BY HORIZON (Verifiable)
+================================================================================
+
+  5-DAY HORIZON (644 samples):
+    Direction Accuracy : 47.8%
+    MAE                : 2.55%
+    RMSE               : 3.49%
+    Correlation        : -0.080
+    Mean Predicted     : +0.91%
+    Mean Actual        : -0.08%
+    Bias (Pred-Actual) : +1.00%  ✅ LOW BIAS
+
+  21-DAY HORIZON (506 samples):
+    Direction Accuracy : 54.9%
+    MAE                : 5.39%
+    RMSE               : 7.14%
+    Correlation        : 0.122
+    Mean Predicted     : +0.43%
+    Mean Actual        : +0.24%
+    Bias (Pred-Actual) : +0.19%  ✅ LOW BIAS
+
+  63-DAY HORIZON (92 samples):
+    Direction Accuracy : 55.4%
+    MAE                : 10.08%
+    RMSE               : 12.22%
+    Correlation        : 0.193
+    Mean Predicted     : +4.65%
+    Mean Actual        : +0.34%
+    Bias (Pred-Actual) : +4.31%  ⚠ BULLISH BIAS
+
+================================================================================
+  3. LIGHTGBM vs LSTM HEAD-TO-HEAD (Raw Predictions)
+================================================================================
+
+  5-DAY HORIZON (644 samples):
+    Metric               |   LightGBM |       LSTM |     Winner
+    ------------------------------------------------------------
+    Dir. Accuracy        |      48.3% |      47.7% |        LGB
+    MAE                  |      2.52% |      2.38% |       LSTM
+    Correlation          |     -0.080 |      0.035 |       LSTM
+    Closer to Actual     |        297 |        347 |       LSTM
+
+  21-DAY HORIZON (506 samples):
+    Metric               |   LightGBM |       LSTM |     Winner
+    ------------------------------------------------------------
+    Dir. Accuracy        |      53.0% |      53.6% |       LSTM
+    MAE                  |      5.36% |      5.44% |        LGB
+    Correlation          |      0.165 |      0.046 |        LGB
+    Closer to Actual     |        268 |        238 |   LightGBM
+
+  63-DAY HORIZON (92 samples):
+    Metric               |   LightGBM |       LSTM |     Winner
+    ------------------------------------------------------------
+    Dir. Accuracy        |      58.7% |      46.7% |        LGB
+    MAE                  |      9.69% |     10.89% |        LGB
+    Correlation          |      0.242 |      0.034 |        LGB
+    Closer to Actual     |         61 |         31 |   LightGBM
+
+================================================================================
+  4. MARKET REGIME DISTRIBUTION
+================================================================================
+    BEAR      :  381 (55.2%)
+    BULL      :  185 (26.8%)
+    NEUTRAL   :  124 (18.0%)
+
+  21-DAY Direction Accuracy by Regime:
+    BEAR      : 57.6% (271 samples)
+    NEUTRAL   : 54.5% (99 samples)
+    BULL      : 50.0% (136 samples)
+
+================================================================================
+  5. TOP/BOTTOM TICKERS (21d Directional Accuracy)
+================================================================================
+
+  🏆 TOP 10:
+    Ticker          | Dir.Acc |   N |  Avg Ret
+    ----------------------------------------
+    LTIM            |    100% |  11 |    -7.6%
+    SBIN            |     91% |  11 |    +8.4%
+    JSWSTEEL        |     82% |  11 |    +4.1%
+    BHARTIARTL      |     82% |  11 |    -2.5%
+    M&M             |     82% |  11 |    -2.7%
+    MARICO          |     82% |  11 |    +2.8%
+    COALINDIA       |     82% |  11 |    +4.4%
+    ICICIBANK       |     73% |  11 |    +1.1%
+    NESTLEIND       |     73% |  11 |    +1.7%
+    ADANIENT        |     73% |  11 |    -0.8%
+
+  💀 BOTTOM 10:
+    Ticker          | Dir.Acc |   N |  Avg Ret
+    ----------------------------------------
+    HINDUNILVR      |     36% |  11 |    +0.3%
+    NTPC            |     36% |  11 |    +5.7%
+    PNB             |     36% |  11 |    +1.5%
+    ITC             |     36% |  11 |    -7.6%
+    ULTRACEMCO      |     27% |  11 |    +3.8%
+    RELIANCE        |     27% |  11 |    -4.0%
+    DLF             |     18% |  11 |    -4.9%
+    TITAN           |     18% |  11 |    +3.7%
+    BAJAJ-AUTO      |      9% |  11 |    +3.4%
+    HDFCBANK        |      0% |  11 |    -3.4%
+
+================================================================================
+  6. META-LEARNER SIGNAL QUALITY
+================================================================================
+    5d BUY :  233 signals | AvgRet:  -0.01% | WinRate:  49.4% | AvgConf: 0.026
+    5d SELL:  198 signals | AvgRet:  -0.22% | WinRate:  51.0% | AvgConf: 0.050
+    5d HOLD:  213 signals | AvgRet:  -0.03% | WinRate:   0.0% | AvgConf: 0.032
+    21d BUY :    4 signals | AvgRet:  +1.34% | WinRate:  50.0% | AvgConf: 0.013
+    21d SELL:  282 signals | AvgRet:  -0.18% | WinRate:  48.2% | AvgConf: 0.059
+    21d HOLD:  220 signals | AvgRet:  +0.75% | WinRate:   0.0% | AvgConf: 0.022
+
+================================================================================
+  ANALYSIS COMPLETE
+================================================================================
