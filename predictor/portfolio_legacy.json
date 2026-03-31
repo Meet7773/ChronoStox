@@ -1,0 +1,265 @@
+{
+    "cash": 20730.871433146727,
+    "positions": {
+        "MPHASIS.NS": {
+            "shares": 2,
+            "avg_price": 2184.89990234375,
+            "type": "LONG"
+        },
+        "COROMANDEL.NS": {
+            "shares": 2,
+            "avg_price": 2020.699951171875,
+            "type": "LONG"
+        },
+        "INFY.NS": {
+            "shares": 4,
+            "avg_price": 1276.300048828125,
+            "type": "LONG"
+        },
+        "360ONE.NS": {
+            "shares": 5,
+            "avg_price": 1048.0999755859375,
+            "type": "LONG"
+        },
+        "ASTRAL.NS": {
+            "shares": 3,
+            "avg_price": 1746.300048828125,
+            "type": "LONG"
+        },
+        "HINDUNILVR.NS": {
+            "shares": 2,
+            "avg_price": 2161.39990234375,
+            "type": "LONG"
+        },
+        "SBILIFE.NS": {
+            "shares": 2,
+            "avg_price": 1938.5999755859375,
+            "type": "LONG"
+        },
+        "PAYTM.NS": {
+            "shares": 5,
+            "avg_price": 1025.699951171875,
+            "type": "LONG"
+        },
+        "COFORGE.NS": {
+            "shares": 4,
+            "avg_price": 1108.800048828125,
+            "type": "LONG"
+        },
+        "HYUNDAI.NS": {
+            "shares": 2,
+            "avg_price": 2019.9000244140625,
+            "type": "LONG"
+        },
+        "MARICO.NS": {
+            "shares": 6,
+            "avg_price": 761.5999755859375,
+            "type": "LONG"
+        },
+        "UNIONBANK.NS": {
+            "shares": 29,
+            "avg_price": 180.9199981689453,
+            "type": "LONG"
+        },
+        "TATACONSUM.NS": {
+            "shares": 4,
+            "avg_price": 1073.4000244140625,
+            "type": "LONG"
+        },
+        "MAXHEALTH.NS": {
+            "shares": 5,
+            "avg_price": 1032.199951171875,
+            "type": "LONG"
+        },
+        "HINDZINC.NS": {
+            "shares": 8,
+            "avg_price": 587.5999755859375,
+            "type": "LONG"
+        },
+        "TATAELXSI.NS": {
+            "shares": 1,
+            "avg_price": 4343.39990234375,
+            "type": "LONG"
+        },
+        "SRF.NS": {
+            "shares": 2,
+            "avg_price": 2488.699951171875,
+            "type": "LONG"
+        }
+    },
+    "history": [
+        {
+            "date": "2026-03-11",
+            "ticker": "MPHASIS.NS",
+            "action": "BUY",
+            "shares": 2,
+            "price": 2184.89990234375,
+            "value": 4369.7998046875,
+            "fees": 5.833682739257813
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "COROMANDEL.NS",
+            "action": "BUY",
+            "shares": 2,
+            "price": 2020.699951171875,
+            "value": 4041.39990234375,
+            "fees": 5.395268869628906
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "INFY.NS",
+            "action": "BUY",
+            "shares": 4,
+            "price": 1276.300048828125,
+            "value": 5105.2001953125,
+            "fees": 6.815442260742188
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "360ONE.NS",
+            "action": "BUY",
+            "shares": 5,
+            "price": 1048.0999755859375,
+            "value": 5240.4998779296875,
+            "fees": 6.996067337036133
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "ASTRAL.NS",
+            "action": "BUY",
+            "shares": 3,
+            "price": 1746.300048828125,
+            "value": 5238.900146484375,
+            "fees": 6.993931695556641
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "HINDUNILVR.NS",
+            "action": "BUY",
+            "shares": 2,
+            "price": 2161.39990234375,
+            "value": 4322.7998046875,
+            "fees": 5.770937739257813
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "OBEROIRLTY.NS",
+            "action": "BUY",
+            "shares": 3,
+            "price": 1488.800048828125,
+            "value": 4466.400146484375,
+            "fees": 5.96264419555664
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "SBILIFE.NS",
+            "action": "BUY",
+            "shares": 2,
+            "price": 1938.5999755859375,
+            "value": 3877.199951171875,
+            "fees": 5.176061934814452
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "PAYTM.NS",
+            "action": "BUY",
+            "shares": 5,
+            "price": 1025.699951171875,
+            "value": 5128.499755859375,
+            "fees": 6.846547174072265
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "COFORGE.NS",
+            "action": "BUY",
+            "shares": 4,
+            "price": 1108.800048828125,
+            "value": 4435.2001953125,
+            "fees": 5.920992260742188
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "HYUNDAI.NS",
+            "action": "BUY",
+            "shares": 2,
+            "price": 2019.9000244140625,
+            "value": 4039.800048828125,
+            "fees": 5.3931330651855465
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "MARICO.NS",
+            "action": "BUY",
+            "shares": 6,
+            "price": 761.5999755859375,
+            "value": 4569.599853515625,
+            "fees": 6.10041580444336
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "UNIONBANK.NS",
+            "action": "BUY",
+            "shares": 29,
+            "price": 180.9199981689453,
+            "value": 5246.679946899414,
+            "fees": 7.004317729110718
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "TATACONSUM.NS",
+            "action": "BUY",
+            "shares": 4,
+            "price": 1073.4000244140625,
+            "value": 4293.60009765625,
+            "fees": 5.731956130371094
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "MAXHEALTH.NS",
+            "action": "BUY",
+            "shares": 5,
+            "price": 1032.199951171875,
+            "value": 5160.999755859375,
+            "fees": 6.889934674072266
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "HINDZINC.NS",
+            "action": "BUY",
+            "shares": 8,
+            "price": 587.5999755859375,
+            "value": 4700.7998046875,
+            "fees": 6.275567739257812
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "TATAELXSI.NS",
+            "action": "BUY",
+            "shares": 1,
+            "price": 4343.39990234375,
+            "value": 4343.39990234375,
+            "fees": 5.798438869628906
+        },
+        {
+            "date": "2026-03-11",
+            "ticker": "SRF.NS",
+            "action": "BUY",
+            "shares": 2,
+            "price": 2488.699951171875,
+            "value": 4977.39990234375,
+            "fees": 6.644828869628906
+        },
+        {
+            "date": "2026-03-12",
+            "ticker": "OBEROIRLTY.NS",
+            "action": "SELL",
+            "shares": 3,
+            "price": 1470.300048828125,
+            "value": 4410.900146484375,
+            "fees": 10.299451842041016,
+            "pnl_pct": -1.47
+        }
+    ],
+    "last_deposit_month": "2026-03"
+}

@@ -31,3 +31,14 @@ test/sector_model_v7_UNIVERSAL_20251113_063532.joblib
 test/macro_features.parquet
 test/ticker_sentiment_scores (1).parquet
 backtester/all_ticker_data.parquet
+test/__pycache__/*
+predictor\__pycache__/*
+data/all_ticker_data.parquet
+.vscode/settings.json
+data/prod-openfga-2026-03-23T07-58-38.log
+/predictor/__pycache__
+predictor/engine.log
+/test/__pycache__
+/test/__pycache__
+test/__pycache__/backtest_oos.cpython-311.pyc
+test/__pycache__/backtest_oos.cpython-312.pyc

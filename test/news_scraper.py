@@ -6,7 +6,7 @@ import pandas as pd
 import os
 
 DEBUG = False
-DAYS = 7
+DAYS = 14
 DEBUG_TICKERS = ["RELIANCE.NS", "TCS.NS", "ONGC.NS"]
 OUTPUT_CSV = "news_dataset.csv"
 
@@ -63,6 +63,12 @@ def run_scraper():
 
             content = item.get("content", {})
 
+            # Relevance filter: skip generic articles Yahoo attaches to small tickers
+            ticker_name = ticker.replace(".NS", "").replace(".BO", "").lower()
+            article_text = (content.get("title", "") + " " + content.get("summary", "")).lower()
+            if ticker_name not in article_text and len(ticker_name) > 2:
+                continue
+
             row = {
                 "Ticker": ticker,
                 "PublishedUTC": ts.isoformat(),
@@ -78,8 +84,15 @@ def run_scraper():
         time.sleep(1.6)
 
     df = pd.DataFrame(final_rows)
-    print("\nFinal preview:")
+    print(f"\nNew articles scraped: {len(df)}")
     print(df.head(10))
+
+    # Append to existing CSV instead of overwriting
+    if os.path.exists(OUTPUT_CSV):
+        df_existing = pd.read_csv(OUTPUT_CSV)
+        df = pd.concat([df_existing, df], ignore_index=True)
+        df = df.drop_duplicates(subset=["Ticker", "PublishedUTC", "Title"], keep="last")
+        print(f"Merged with existing data. Total rows: {len(df)}")
 
     df.to_csv(OUTPUT_CSV, index=False)
     print(f"\nSaved → {OUTPUT_CSV}")

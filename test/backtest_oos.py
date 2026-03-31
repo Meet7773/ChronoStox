@@ -1,24 +1,6 @@
-# ===============================================================
-# ChronoStox v9.5 — Out-of-Sample Backtester (Combined+ Edition)
-#
-# SIGNAL STRATEGIES (all tracked):
-#   A) HYBRID: bidirectional ATR + ML price targets
-#   B) META-LEARNER: XGBoost classifier on raw LGBM+LSTM outputs
-#   C) COMBINED: trade only when BOTH hybrid and meta agree
-#   D) REGIME-AWARE: HMM modulates signal filtering
-#   E) COMBINED+ (default): combined + confidence floor + multi-horizon
-#      + per-ticker quality filter
-#
-# Guardrails: volatility clamp (prevents hallucination)
-#
-# USAGE:
-#   cd test
-#   python backtest_oos.py
-#   python backtest_oos.py --tickers RELIANCE.NS TCS.NS INFY.NS
-#   python backtest_oos.py --start 2025-11-15 --end 2026-02-15
-#   python backtest_oos.py --weekly     (default, simulate every Friday)
-#   python backtest_oos.py --daily      (simulate every trading day — slow)
-# ===============================================================
+# backtest_oos_fast_with_full_report.py
+# Fast tensor-batched backtester with detailed reporting & trade ledger
+# Optimized for local execution.
 
 import os
 import sys
@@ -30,14 +12,13 @@ import joblib
 import time
 import argparse
 from datetime import datetime, timedelta
-from collections import defaultdict
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["LOKY_MAX_CPU_COUNT"] = "1"       # Fix Windows HMM/loky crash
-os.environ["JOBLIB_VERBOSITY"] = "0"
+os.environ["LOKY_MAX_CPU_COUNT"] = "1"
 try:
     import tensorflow as tf
     from tensorflow.keras.models import load_model
+
     tf.get_logger().setLevel("ERROR")
 except Exception as e:
     print("FATAL: TensorFlow load error:", e)
@@ -47,17 +28,15 @@ import pandas_ta as ta
 
 try:
     from hmmlearn.hmm import GaussianHMM
+
     HMM_AVAILABLE = True
 except ImportError:
     HMM_AVAILABLE = False
-    print("⚠ hmmlearn not installed — HMM regime detection disabled. pip install hmmlearn")
+    print("⚠ hmmlearn not installed — HMM regime detection disabled.")
 
 warnings.filterwarnings("ignore")
 
-# ===============================================================
-# CONFIG
-# ===============================================================
-
+# ------------------ CONFIG ------------------
 MODEL_JOBLIB = "sector_model_v7_UNIVERSAL_20251113_063532.joblib"
 MODEL_KERAS = "final_lstm_20251113_124137.keras"
 MACRO_FILE = "macro_features.parquet"
@@ -66,76 +45,32 @@ SECTOR_FILE = "ticker.csv"
 
 HORIZONS = [5, 21, 63, 126, 252]
 ATR_MULT = {5: 1.0, 21: 1.8, 63: 3.0, 126: 4.8, 252: 7.2}
-
 WEIGHT_ML_H = {5: 0.62, 21: 0.55, 63: 0.50, 126: 0.42, 252: 0.35}
 WEIGHT_ATR_H = {h: 1 - WEIGHT_ML_H[h] for h in HORIZONS}
 
-# Default tickers — comprehensive cross-section of Indian market
-# Covers: Large-cap, Mid-cap, PSU, across all sectors
-DEFAULT_TICKERS = [
-    # === Banking & Financial ===
-    "HDFCBANK.NS",     # Large-cap Private Bank
-    "ICICIBANK.NS",    # Large-cap Private Bank
-    "SBIN.NS",         # PSU Bank
-    "KOTAKBANK.NS",    # Large-cap Private Bank
-    "BAJFINANCE.NS",   # NBFC
-    "BANKBARODA.NS",   # PSU Mid-cap Bank
-    "PNB.NS",          # PSU Bank
-    "HDFCLIFE.NS",     # Insurance
-    # === Technology ===
-    "TCS.NS",          # Large-cap IT
-    "INFY.NS",         # Large-cap IT
-    "WIPRO.NS",        # Large-cap IT
-    "HCLTECH.NS",      # Large-cap IT
-    "TECHM.NS",        # Mid-cap IT
-    "LTIM.NS",         # Mid-cap IT
-    # === Energy & Oil ===
-    "RELIANCE.NS",     # Conglomerate/Energy
-    "ONGC.NS",         # PSU Oil
-    "BPCL.NS",         # PSU Oil
-    "COALINDIA.NS",    # PSU Mining
-    "NTPC.NS",         # PSU Power
-    "POWERGRID.NS",    # PSU Utilities
-    # === FMCG & Consumer ===
-    "HINDUNILVR.NS",   # Large-cap FMCG
-    "ITC.NS",          # Large-cap FMCG
-    "NESTLEIND.NS",    # FMCG
-    "TITAN.NS",        # Consumer Discretionary
-    "DABUR.NS",        # Mid-cap FMCG
-    "MARICO.NS",       # Mid-cap FMCG
-    # === Pharma & Healthcare ===
-    "SUNPHARMA.NS",    # Large-cap Pharma
-    "DRREDDY.NS",      # Large-cap Pharma
-    "CIPLA.NS",        # Large-cap Pharma
-    "APOLLOHOSP.NS",   # Healthcare
-    # === Auto & Manufacturing ===
-    "MARUTI.NS",       # Large-cap Auto
-    "M&M.NS",          # Large-cap Auto
-    "TATAMOTORS.NS",   # Large-cap Auto
-    "BAJAJ-AUTO.NS",   # Two-wheeler
-    "EICHERMOT.NS",    # Mid-cap Auto
-    # === Industrials & Infra ===
-    "LT.NS",           # Large-cap Infra
-    "ADANIENT.NS",     # Conglomerate
-    "ADANIPORTS.NS",   # Ports/Infra
-    "ULTRACEMCO.NS",   # Cement
-    "GRASIM.NS",       # Diversified
-    # === Telecom & Media ===
-    "BHARTIARTL.NS",   # Large-cap Telecom
-    # === Metals & Mining ===
-    "TATASTEEL.NS",    # Steel
-    "HINDALCO.NS",     # Aluminium
-    "JSWSTEEL.NS",     # Steel
-    # === Real Estate ===
-    "DLF.NS",          # Real Estate
-    # === Defensive/Others ===
-    "ASIANPAINT.NS",   # Paints
-    "BRITANNIA.NS",    # FMCG/Defensive
-]
+SLIPPAGE_BPS = 10
+BROKERAGE_BPS = 3
+STT_BPS = 10
+EXCHANGE_FEES_BPS = 0.35
+TOTAL_BUY_FEE_PCT = (SLIPPAGE_BPS + BROKERAGE_BPS + EXCHANGE_FEES_BPS) / 10000.0
+TOTAL_SELL_FEE_PCT = (SLIPPAGE_BPS + BROKERAGE_BPS + STT_BPS + EXCHANGE_FEES_BPS) / 10000.0
 
-# ===============================================================
-# DATA LOADING (same as engine)
-# ===============================================================
+DEFAULT_TICKERS = ["RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS"]
+
+
+# ------------------ UTIL ------------------
+
+def get_dynamic_tickers():
+    try:
+        df_nse = pd.read_csv('https://archives.nseindia.com/content/indices/ind_nifty200list.csv')
+        tickers = [str(sym).strip() + ".NS" for sym in df_nse["Symbol"].dropna().tolist()]
+        return tickers
+    except Exception as e:
+        print(f"⚠️ Failed to fetch live NSE 200 list: {e}\n⚠️ Falling back to DEFAULT_TICKERS.")
+        return DEFAULT_TICKERS
+
+
+# ------------------ DATA LOADERS ------------------
 
 def safe_read_parquet(path):
     try:
@@ -146,117 +81,66 @@ def safe_read_parquet(path):
 
 
 def load_models_once(model_dir):
-    joblib_path = os.path.join(model_dir, MODEL_JOBLIB)
-    keras_path = os.path.join(model_dir, MODEL_KERAS)
-
-    bundle = joblib.load(joblib_path)
-    lstm_model = load_model(keras_path, compile=False)
-
+    bundle = joblib.load(os.path.join(model_dir, MODEL_JOBLIB))
+    lstm_model = load_model(os.path.join(model_dir, MODEL_KERAS), compile=False)
     return {
-        "scaler": bundle["scaler"],
-        "lgbm": bundle["model_lgbm"],
-        "meta_models": bundle.get("meta_models", {}),
-        "features": bundle["features"],
-        "horizons": bundle["horizons"],
-        "seq_len": bundle["lstm_sequence_length"],
+        "scaler": bundle["scaler"], "lgbm": bundle["model_lgbm"],
+        "meta_models": bundle.get("meta_models", {}), "features": bundle["features"],
+        "horizons": bundle["horizons"], "seq_len": bundle["lstm_sequence_length"],
         "lstm": lstm_model
     }
 
 
 def load_macro_once(data_dir):
-    path = os.path.join(data_dir, MACRO_FILE)
-    df = safe_read_parquet(path)
-    if "Date" not in df.columns:
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.reset_index().rename(columns={"index": "Date"})
-        else:
-            print("FATAL: Macro file missing Date column.")
-            sys.exit(1)
+    df = safe_read_parquet(os.path.join(data_dir, MACRO_FILE))
+    if "Date" not in df.columns: df = df.reset_index().rename(columns={"index": "Date"})
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None)
     return df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
 
 def load_sentiment_once(data_dir):
-    path = os.path.join(data_dir, SENTIMENT_FILE)
-    df = safe_read_parquet(path)
-
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    elif isinstance(df.index, pd.DatetimeIndex):
-        df = df.reset_index().rename(columns={"index": "Date"})
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    else:
-        print("FATAL: Sentiment missing Date"); sys.exit(1)
-
-    df["Date"] = df["Date"].dt.tz_localize(None)
+    df = safe_read_parquet(os.path.join(data_dir, SENTIMENT_FILE))
+    if "Date" not in df.columns: df = df.reset_index().rename(columns={"index": "Date"})
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None)
     df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
-
-    # Standardise columns
     for c in df.columns:
-        if c.lower() in ["ticker", "tickeryf", "ticker_yf", "symbol"]:
-            df = df.rename(columns={c: "Ticker_YF"}); break
-    if "Ticker_YF" not in df.columns:
-        for c in df.columns:
-            if "ticker" in c.lower():
-                df = df.rename(columns={c: "Ticker_YF"}); break
-
-    if "sentiment_score" not in df.columns:
-        for c in df.columns:
-            if "sentiment" in c.lower():
-                df = df.rename(columns={c: "sentiment_score"}); break
-
+        if c.lower() in ["ticker", "tickeryf", "ticker_yf", "symbol"]: df = df.rename(columns={c: "Ticker_YF"})
+        if "sentiment" in c.lower(): df = df.rename(columns={c: "sentiment_score"})
     return df
 
 
 def load_sectors_once(data_dir):
-    path = os.path.join(data_dir, SECTOR_FILE)
     try:
-        df = pd.read_csv(path, low_memory=False)
+        df = pd.read_csv(os.path.join(data_dir, SECTOR_FILE), low_memory=False)
     except:
-        df = pd.read_csv(path, header=None, low_memory=False)
-
+        df = pd.read_csv(os.path.join(data_dir, SECTOR_FILE), header=None, low_memory=False)
     cols = df.columns.tolist()
-    ticker_col, sector_col = None, None
-    for c in cols:
-        if str(c).lower() in ["ticker", "ticker_yf", "symbol"]: ticker_col = c
-        if "sector" in str(c).lower(): sector_col = c
-    if not ticker_col: ticker_col = cols[0]
-    if not sector_col: sector_col = cols[2] if len(cols) > 2 else cols[-1]
-
+    ticker_col = next((c for c in cols if str(c).lower() in ["ticker", "ticker_yf", "symbol"]), cols[0])
+    sector_col = next((c for c in cols if "sector" in str(c).lower()), cols[-1])
     df = df.rename(columns={ticker_col: "Ticker_YF", sector_col: "Sector"})
     df["Ticker_YF"] = df["Ticker_YF"].astype(str).str.strip().str.upper()
     return df[["Ticker_YF", "Sector"]].drop_duplicates()
 
 
-def fetch_price_history(ticker, start_date="2024-01-01"):
-    """Fetch full price history for a ticker via yfinance."""
+def fetch_price_history(ticker, start_date="2018-01-01"):
     try:
         df = yf.Ticker(ticker).history(start=start_date, interval="1d")
-        if df.empty:
-            return None
+        if df.empty: return None
         df = df.reset_index()
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None)
-        df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+        df = df.dropna(subset=["Date"]).sort_values("Date").drop_duplicates(subset=["Date"], keep="last").reset_index(
+            drop=True)
         df["Ticker_YF"] = ticker
         return df
-    except Exception as e:
-        print(f"  ⚠ Failed to fetch {ticker}: {e}")
+    except Exception:
         return None
 
 
-# ===============================================================
-# FEATURE ENGINEERING (adapted from engine)
-# ===============================================================
+# ------------------ FEATURE PRECOMPUTE ------------------
 
-def engineer_features_for_slice(df_price, df_macro, df_senti, df_sector, expected_cols):
-    """
-    Run feature engineering on a price slice.
-    Returns (df_final, df_full) or (None, None) on failure.
-    """
+def precompute_features(df_price, df_macro, df_senti, df_sector, expected_cols):
     try:
         df = df_price.copy()
-
-        # TA indicators
         df.ta.adx(length=14, append=True)
         df.ta.atr(length=14, append=True)
         df.ta.ema(length=50, append=True)
@@ -273,598 +157,454 @@ def engineer_features_for_slice(df_price, df_macro, df_senti, df_sector, expecte
             df["MACDs_12_26_9"] = mac.iloc[:, 2]
 
         df.ta.rsi(append=True)
-
         ema200 = [c for c in df.columns if "EMA" in c and "200" in str(c)]
         df["close_to_ema200"] = df["Close"] / (df[ema200[0]] + 1e-9) if ema200 else np.nan
 
-        # Macro merge
         df = df.sort_values("Date").reset_index(drop=True)
         df = pd.merge_asof(df, df_macro.sort_values("Date"), on="Date", direction="backward")
 
-        # Sentiment merge
         ticker = df["Ticker_YF"].iloc[0].upper().strip()
         df_sl = df_senti.copy()
         df_sl["Ticker_YF"] = df_sl["Ticker_YF"].astype(str).str.upper().str.strip()
         ssub = df_sl[df_sl["Ticker_YF"] == ticker]
-        if ssub.empty:
-            ssub = pd.DataFrame({"Date": df["Date"], "sentiment_score": np.zeros(len(df))})
-        ssub = ssub.sort_values("Date")[["Date", "sentiment_score"]]
+        if ssub.empty: ssub = pd.DataFrame({"Date": df["Date"], "sentiment_score": np.zeros(len(df))})
+        ssub = ssub.sort_values("Date")[['Date', 'sentiment_score']]
         df = pd.merge_asof(df, ssub, on="Date", direction="backward", allow_exact_matches=True)
 
-        # Sector
         sec_row = df_sector[df_sector["Ticker_YF"] == ticker]
         sector = sec_row["Sector"].iloc[0] if not sec_row.empty else "nan"
         sector = str(sector).strip()
         df["Sector"] = sector
-
-        sectors = ["Communication Services", "Consumer Cyclical", "Consumer Defensive",
-                    "Energy", "Financial Services", "Healthcare", "Industrials",
-                    "Real Estate", "Technology", "Utilities", "nan"]
-        for s in sectors:
+        for s in ["Communication Services", "Consumer Cyclical", "Consumer Defensive", "Energy", "Financial Services",
+                  "Healthcare", "Industrials", "Real Estate", "Technology", "Utilities", "nan"]:
             df[f"Sector_{s}"] = 1.0 if sector == s else 0.0
 
-        # Interactions
-        if "sentiment_score" not in df.columns:
-            df["sentiment_score"] = 0.0
+        if "sentiment_score" not in df.columns: df["sentiment_score"] = 0.0
         for c in df.columns:
             if str(c).startswith("Sector_"):
                 df[f"sentiment_x_{c}"] = df[c].astype(float) * df["sentiment_score"].astype(float)
 
-        # Cleanup
         df = df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        for col in set(expected_cols) - set(df.columns):
-            df[col] = 0.0
+        for col in set(expected_cols) - set(df.columns): df[col] = 0.0
 
-        df_final = df[expected_cols].copy()
-        return df_final, df
+        atr_col = next((c for c in ["ATR_14", "ATRr_14", "ATR"] if c in df.columns), None)
+        df["ATR_final"] = df[atr_col] if atr_col else df["Close"] * 0.01
 
+        return df
     except Exception as e:
-        return None, None
+        return None
 
 
-# ===============================================================
-# PREDICTION (FIXED — bidirectional ATR, meta-learner driven)
-# ===============================================================
-
-def predict_at_date(df_full, models, dynamic_weights=None):
-    """
-    Run prediction using the full merged dataframe.
-    Returns dict with raw predictions, bidirectional hybrid targets,
-    and meta-learner signals.
-    """
-    close = float(df_full["Close"].iloc[-1])
-    feature_order = models["features"]
-    scaler = models["scaler"]
-    model_lgb = models["lgbm"]
-    model_lstm = models["lstm"]
-    seq_len = models["seq_len"]
-
-    try:
-        X_row = df_full[feature_order].iloc[-1].values.astype(np.float32).reshape(1, -1)
-        Xs = scaler.transform(X_row)
-        raw_lgb = model_lgb.predict(Xs)[0]
-
-        if len(df_full) >= seq_len:
-            seq = df_full[feature_order].tail(seq_len).values.astype(np.float32).reshape(1, seq_len, -1)
-            raw_lstm = model_lstm.predict(seq, verbose=0)[0]
-        else:
-            raw_lstm = np.zeros_like(raw_lgb)
-
-        if dynamic_weights is not None:
-            w_lgb = dynamic_weights.get("lgbm", 0.5)
-            w_lstm = dynamic_weights.get("lstm", 0.5)
-        else:
-            w_lgb = 0.5
-            w_lstm = 0.5
-            
-        raw_avg = (raw_lgb * w_lgb) + (raw_lstm * w_lstm)
-    except Exception:
-        raw_lgb = np.zeros(len(HORIZONS))
-        raw_lstm = np.zeros(len(HORIZONS))
-        raw_avg = np.zeros(len(HORIZONS))
-
-    # ATR
-    atr_col = None
-    for c in ["ATR_14", "ATRr_14", "ATR"]:
-        if c in df_full.columns:
-            atr_col = c; break
-    atr = float(df_full[atr_col].iloc[-1]) if atr_col else close * 0.01
-
-    vol_factor = atr / close
-
-    # --- FIX: BIDIRECTIONAL ATR expansion ---
-    # ATR component now goes UP when ML predicts positive, DOWN when negative
-    # This removes the permanent bullish bias from the old version
-    ml_prices = close * (1.0 + raw_avg)
-
-    hybrid = []
-    for i, h in enumerate(HORIZONS):
-        atr_offset = atr * ATR_MULT[h]
-        ml_direction = np.sign(raw_avg[i])  # +1 if bullish, -1 if bearish, 0 if flat
-
-        # ATR expansion follows ML direction
-        if ml_direction >= 0:
-            atr_price = close + atr_offset
-        else:
-            atr_price = close - atr_offset
-
-        raw_h = ml_prices[i] * WEIGHT_ML_H[h] + atr_price * WEIGHT_ATR_H[h]
-
-        # GUARDRAIL: volatility-based clamp (prevents hallucination)
-        max_move = vol_factor * np.sqrt(h) * 2.0
-        clamped = max(close * (1 - max_move), min(close * (1 + max_move), raw_h))
-        hybrid.append(clamped)
-
-    # Meta-learner signals
-    meta_signals = {}
-    meta_models = models.get("meta_models", {})
-    for i, h in enumerate(HORIZONS):
-        if h in meta_models:
-            try:
-                X_meta = np.array([[raw_lgb[i], raw_lstm[i]]], dtype=np.float32)
-                proba = meta_models[h].predict_proba(X_meta)[0]
-                pred_class = int(meta_models[h].predict(X_meta)[0])
-                meta_signals[h] = {
-                    "class": pred_class,     # 0=Sell, 1=Hold, 2=Buy
-                    "proba": proba.tolist(),
-                    "signal": ["SELL", "HOLD", "BUY"][pred_class],
-                    "confidence": float(max(proba) - sorted(proba)[-2])  # gap between top two
-                }
-            except:
-                meta_signals[h] = {"class": 1, "proba": [0, 1, 0], "signal": "HOLD", "confidence": 0.0}
-
-    return {
-        "close": close,
-        "raw_lgb": raw_lgb,
-        "raw_lstm": raw_lstm,
-        "raw_avg": raw_avg,
-        "hybrid": np.array(hybrid),
-        "predicted_returns": {h: (hybrid[i] - close) / close for i, h in enumerate(HORIZONS)},
-        "meta_signals": meta_signals
-    }
-
-
-# ===============================================================
-# METRICS COMPUTATION (tracks both hybrid and meta-learner)
-# ===============================================================
-
-def compute_metrics(results_df):
-    """Compute comprehensive backtest metrics from results."""
-    metrics = {}
-
-    for h in HORIZONS:
-        pred_col = f"pred_ret_{h}d"
-        actual_col = f"actual_ret_{h}d"
-
-        if pred_col not in results_df.columns or actual_col not in results_df.columns:
-            continue
-
-        df = results_df.dropna(subset=[pred_col, actual_col])
-        if len(df) == 0:
-            continue
-
-        pred = df[pred_col].values
-        actual = df[actual_col].values
-
-        # Directional accuracy (hybrid-based)
-        pred_dir = np.sign(pred)
-        actual_dir = np.sign(actual)
-        dir_acc = np.mean(pred_dir == actual_dir) * 100
-
-        # MAE and RMSE (as %)
-        mae = np.mean(np.abs(pred - actual)) * 100
-        rmse = np.sqrt(np.mean((pred - actual) ** 2)) * 100
-
-        # Correlation
-        corr = np.corrcoef(pred, actual)[0, 1] if len(pred) > 2 else 0.0
-
-        # Mean predicted vs mean actual
-        mean_pred = np.mean(pred) * 100
-        mean_actual = np.mean(actual) * 100
-
-        # --- Hybrid-based signals (pred_ret > 0.5% = BUY, < -0.5% = SELL) ---
-        buy_mask = pred > 0.005
-        sell_mask = pred < -0.005
-        hold_mask = ~buy_mask & ~sell_mask
-
-        buy_count = int(buy_mask.sum())
-        sell_count = int(sell_mask.sum())
-        hold_count = int(hold_mask.sum())
-
-        buy_actual = actual[buy_mask].mean() * 100 if buy_mask.any() else None
-        sell_actual = actual[sell_mask].mean() * 100 if sell_mask.any() else None
-
-        buy_win_rate = (actual[buy_mask] > 0).mean() * 100 if buy_mask.any() else None
-        sell_win_rate = (actual[sell_mask] < 0).mean() * 100 if sell_mask.any() else None
-
-        # --- Meta-learner signal analysis ---
-        meta_col = f"meta_signal_{h}d"
-        meta_acc = None
-        meta_buy_count = 0
-        meta_sell_count = 0
-        meta_hold_count = 0
-        meta_buy_win_rate = None
-        meta_sell_win_rate = None
-        meta_buy_avg_ret = None
-        meta_sell_avg_ret = None
-
-        if meta_col in results_df.columns:
-            dm = df.dropna(subset=[meta_col])
-            if len(dm) > 0:
-                meta_correct = 0
-                for _, row in dm.iterrows():
-                    sig = row[meta_col]
-                    act = row[actual_col]
-                    if sig == "BUY" and act > 0:
-                        meta_correct += 1
-                    elif sig == "SELL" and act < 0:
-                        meta_correct += 1
-                    elif sig == "HOLD" and abs(act) < 0.05:
-                        meta_correct += 1
-                meta_acc = meta_correct / len(dm) * 100
-
-                # Meta signal counts & win rates
-                meta_buy_mask = dm[meta_col] == "BUY"
-                meta_sell_mask = dm[meta_col] == "SELL"
-                meta_hold_mask = dm[meta_col] == "HOLD"
-
-                meta_buy_count = int(meta_buy_mask.sum())
-                meta_sell_count = int(meta_sell_mask.sum())
-                meta_hold_count = int(meta_hold_mask.sum())
-
-                meta_buy_actuals = dm.loc[meta_buy_mask, actual_col].values
-                meta_sell_actuals = dm.loc[meta_sell_mask, actual_col].values
-
-                if len(meta_buy_actuals) > 0:
-                    meta_buy_win_rate = (meta_buy_actuals > 0).mean() * 100
-                    meta_buy_avg_ret = meta_buy_actuals.mean() * 100
-                if len(meta_sell_actuals) > 0:
-                    meta_sell_win_rate = (meta_sell_actuals < 0).mean() * 100
-                    meta_sell_avg_ret = meta_sell_actuals.mean() * 100
-
-        metrics[h] = {
-            "n_samples": len(df),
-            "directional_accuracy": round(dir_acc, 1),
-            "mae_pct": round(mae, 2),
-            "rmse_pct": round(rmse, 2),
-            "correlation": round(corr, 3),
-            "mean_predicted_pct": round(mean_pred, 2),
-            "mean_actual_pct": round(mean_actual, 2),
-            # Hybrid-based signals
-            "hybrid_buy_count": buy_count,
-            "hybrid_sell_count": sell_count,
-            "hybrid_hold_count": hold_count,
-            "hybrid_buy_avg_ret": round(buy_actual, 2) if buy_actual is not None else "N/A",
-            "hybrid_buy_win_rate": round(buy_win_rate, 1) if buy_win_rate is not None else "N/A",
-            "hybrid_sell_avg_ret": round(sell_actual, 2) if sell_actual is not None else "N/A",
-            "hybrid_sell_win_rate": round(sell_win_rate, 1) if sell_win_rate is not None else "N/A",
-            # Meta-learner signals
-            "meta_accuracy": round(meta_acc, 1) if meta_acc is not None else "N/A",
-            "meta_buy_count": meta_buy_count,
-            "meta_sell_count": meta_sell_count,
-            "meta_hold_count": meta_hold_count,
-            "meta_buy_win_rate": round(meta_buy_win_rate, 1) if meta_buy_win_rate is not None else "N/A",
-            "meta_sell_win_rate": round(meta_sell_win_rate, 1) if meta_sell_win_rate is not None else "N/A",
-            "meta_buy_avg_ret": round(meta_buy_avg_ret, 2) if meta_buy_avg_ret is not None else "N/A",
-            "meta_sell_avg_ret": round(meta_sell_avg_ret, 2) if meta_sell_avg_ret is not None else "N/A",
-        }
-
-    return metrics
-
-
-# ===============================================================
-# HMM REGIME DETECTION
-# ===============================================================
+# ------------------ HMM ------------------
 
 def detect_regime_for_slice(df_price_slice):
-    """
-    Fit a 3-state GaussianHMM on the price slice and return the current regime.
-    Returns: str — one of 'BULL', 'BEAR', 'NEUTRAL'
-    Uses adaptive interpretation (same logic as hmm_regime_detector.py).
-    """
-    if not HMM_AVAILABLE:
-        return "NEUTRAL"
-
+    if not HMM_AVAILABLE or df_price_slice is None or len(df_price_slice) < 60: return "NEUTRAL"
     try:
         df = df_price_slice.copy()
         df["log_ret"] = np.log(df["Close"] / df["Close"].shift(1)) * 100
         df["range_vol"] = ((df["High"] - df["Low"]) / df["Close"]) * 100
         df = df.dropna(subset=["log_ret", "range_vol"])
-
-        if len(df) < 60:  # need enough data
-            return "NEUTRAL"
+        if len(df) < 60: return "NEUTRAL"
 
         X = df[["log_ret", "range_vol"]].values
-
-        model = GaussianHMM(n_components=3, covariance_type="full",
-                            n_iter=500, random_state=420)
+        model = GaussianHMM(n_components=3, covariance_type="full", n_iter=500, random_state=420)
         model.fit(X)
         states = model.predict(X)
         df["state"] = states
 
-        # Adaptive interpretation
-        global_avg_ret = df["log_ret"].mean()
-        global_avg_vol = df["range_vol"].mean()
-
+        global_avg_ret, global_avg_vol = df["log_ret"].mean(), df["range_vol"].mean()
         current_state = states[-1]
-
         mask = df["state"] == current_state
-        state_ret = df.loc[mask, "log_ret"].mean()
-        state_vol = df.loc[mask, "range_vol"].mean()
+        state_ret, state_vol = df.loc[mask, "log_ret"].mean(), df.loc[mask, "range_vol"].mean()
 
-        # Classify
         if state_ret > global_avg_ret and state_vol < global_avg_vol:
-            return "BULL"      # Stable uptrend
+            return "BULL"
         elif state_ret > 0 and state_vol > (global_avg_vol * 1.2):
-            return "BULL"      # Volatile uptrend — still bullish
+            return "BULL"
         elif state_ret < -0.1:
-            return "BEAR"      # Crash
+            return "BEAR"
         elif state_ret < 0 and state_vol > global_avg_vol:
-            return "BEAR"      # Panic
-        else:
-            return "NEUTRAL"
-
+            return "BEAR"
+        return "NEUTRAL"
     except Exception:
         return "NEUTRAL"
 
 
-def compute_portfolio_metrics(results_df):
+# ------------------ METRICS COMPUTATION ------------------
+
+def compute_metrics(results_df):
     """
-    THREE portfolio strategies computed:
-      1) META-ONLY:    trade on meta-learner signal alone
-      2) COMBINED:     trade only when hybrid + meta agree (confidence sizing)
-      3) HYBRID-ONLY:  trade on hybrid price direction alone
-    All use 21d horizon. Returns dict with all three.
+    Build per-horizon metrics including comprehensive win rates and average returns.
     """
-    strategies = {}
+    metrics = {}
+    if results_df is None or results_df.empty:
+        return metrics
 
-    # --- Strategy 1: META-ONLY (flat 20%) ---
-    strategies["meta_only"] = _run_portfolio_sim(
-        results_df, signal_mode="meta", label="META-ONLY"
-    )
+    for h in HORIZONS:
+        pred_col = f"pred_ret_{h}d"
+        actual_col = f"actual_ret_{h}d"
+        meta_col = f"meta_signal_{h}d"
 
-    # --- Strategy 2: COMBINED (hybrid + meta agree, confidence sizing) ---
-    strategies["combined"] = _run_portfolio_sim(
-        results_df, signal_mode="combined", label="COMBINED"
-    )
+        if pred_col not in results_df.columns: continue
+        dfh = results_df.dropna(subset=[pred_col])
+        if len(dfh) == 0: continue
 
-    # --- Strategy 3: HYBRID-ONLY (flat 20%) ---
-    strategies["hybrid_only"] = _run_portfolio_sim(
-        results_df, signal_mode="hybrid", label="HYBRID-ONLY"
-    )
-
-    # --- Strategy 4: REGIME-AWARE (HMM modulated combined) ---
-    strategies["regime_aware"] = _run_portfolio_sim(
-        results_df, signal_mode="regime", label="REGIME-AWARE"
-    )
-
-    # --- Strategy 5: COMBINED+ (multi-horizon + confidence floor + ticker quality) ---
-    strategies["combined_plus"] = _run_portfolio_sim(
-        results_df, signal_mode="combined_plus", label="COMBINED+"
-    )
-
-    return strategies
-
-
-def _run_portfolio_sim(results_df, signal_mode="combined", label=""):
-    """Run a single portfolio simulation with the given signal mode."""
-    portfolio = {"equity": [100.0], "trades": 0, "wins": 0, "losses": 0,
-                 "buy_trades": 0, "sell_trades": 0, "buy_wins": 0, "sell_wins": 0,
-                 "skipped_disagreement": 0, "regime_overrides": 0,
-                 "skipped_confidence": 0, "skipped_horizon": 0, "skipped_ticker": 0}
-
-    actual_col = "actual_ret_21d"
-    meta_col = "meta_signal_21d"
-    pred_col = "pred_ret_21d"
-    conf_col = "meta_confidence_21d"
-    regime_col = "hmm_regime"
-
-    df = results_df.dropna(subset=[actual_col]).copy()
-    if meta_col not in df.columns or pred_col not in df.columns:
-        return _empty_portfolio()
-
-    df = df.dropna(subset=[meta_col, pred_col])
-    df = df.sort_values("sim_date")
-
-    # Per-ticker win rate tracking (for combined_plus)
-    ticker_track = {}
-
-    for _, row in df.iterrows():
-        meta_signal = row[meta_col]
-        hybrid_ret = row[pred_col]
-        actual = row[actual_col]
-        confidence = row.get(conf_col, 0.05)
-        if pd.isna(confidence):
-            confidence = 0.05
-
-        # Determine hybrid direction
-        if hybrid_ret > 0.005:
-            hybrid_signal = "BUY"
-        elif hybrid_ret < -0.005:
-            hybrid_signal = "SELL"
+        # Require actual to compute precision stats
+        if actual_col in dfh.columns:
+            df_valid = dfh.dropna(subset=[actual_col])
         else:
-            hybrid_signal = "HOLD"
+            df_valid = dfh.copy()
 
-        # Determine trade signal based on mode
-        if signal_mode == "regime":
-            # REGIME-AWARE: use HMM regime to modulate signal filtering
-            regime = row.get(regime_col, "NEUTRAL") if regime_col in df.columns else "NEUTRAL"
-            if pd.isna(regime):
-                regime = "NEUTRAL"
+        n_samples = len(df_valid)
+        if n_samples == 0: continue
 
-            if regime == "BULL":
-                # In BULL: accept BUY if EITHER meta or hybrid says BUY
-                # Only accept SELL if BOTH agree (high conviction short)
-                if meta_signal == "BUY" or hybrid_signal == "BUY":
-                    trade_signal = "BUY"
-                    portfolio["regime_overrides"] += 1
-                elif meta_signal == "SELL" and hybrid_signal == "SELL":
-                    trade_signal = "SELL"
-                else:
-                    continue
-            elif regime == "BEAR":
-                # In BEAR: accept SELL if EITHER meta or hybrid says SELL
-                # Only accept BUY if BOTH agree (high conviction long)
-                if meta_signal == "SELL" or hybrid_signal == "SELL":
-                    trade_signal = "SELL"
-                    portfolio["regime_overrides"] += 1
-                elif meta_signal == "BUY" and hybrid_signal == "BUY":
-                    trade_signal = "BUY"
-                else:
-                    continue
-            else:
-                # NEUTRAL: strict combined (both must agree)
-                if meta_signal == "HOLD" or hybrid_signal == "HOLD":
-                    continue
-                if meta_signal != hybrid_signal:
-                    portfolio["skipped_disagreement"] += 1
-                    continue
-                trade_signal = meta_signal
+        preds = df_valid[pred_col].astype(float)
+        actuals = df_valid[actual_col].astype(float) if actual_col in df_valid.columns else pd.Series(
+            [np.nan] * len(df_valid))
 
-            position_size = min(0.30, max(0.10, 0.10 + confidence * 2.0))
+        sign_eq = (np.sign(preds) == np.sign(actuals)) & (np.sign(actuals) != 0)
+        directional_accuracy = float(sign_eq.sum() / max(1, len(preds))) * 100.0
+        mae_pct = float((preds - actuals).abs().mean() * 100.0)
+        corr = float(preds.corr(actuals)) if len(preds) > 1 and actuals.notna().sum() > 1 else 0.0
 
-        elif signal_mode == "combined_plus":
-            # COMBINED+: combined + multi-horizon + confidence floor + ticker quality
-            # Step 1: Both hybrid & meta must agree on 21d (same as combined)
-            if meta_signal == "HOLD" or hybrid_signal == "HOLD":
-                continue
-            if meta_signal != hybrid_signal:
-                portfolio["skipped_disagreement"] += 1
-                continue
-            trade_signal = meta_signal
+        mean_pred = float(preds.mean() * 100.0)
+        mean_actual = float(actuals.mean() * 100.0)
 
-            # Step 2: Confidence floor — meta must be decisive
-            if confidence < 0.08:
-                portfolio["skipped_confidence"] += 1
-                continue
+        # Hybrid Signal Deep Dive
+        buy_mask = preds > 0.005
+        sell_mask = preds < -0.005
 
-            # Step 3: Multi-horizon confirmation — 5d meta must agree with 21d direction
-            meta_5d_col = "meta_signal_5d"
-            if meta_5d_col in df.columns:
-                meta_5d = row.get(meta_5d_col, "HOLD")
-                if pd.isna(meta_5d):
-                    meta_5d = "HOLD"
-                # 5d meta should either agree or be HOLD (not contradict)
-                if trade_signal == "BUY" and meta_5d == "SELL":
-                    portfolio["skipped_horizon"] += 1
-                    continue
-                if trade_signal == "SELL" and meta_5d == "BUY":
-                    portfolio["skipped_horizon"] += 1
-                    continue
+        hybrid_buy_count = int(buy_mask.sum())
+        hybrid_sell_count = int(sell_mask.sum())
+        hybrid_hold_count = int(((preds <= 0.005) & (preds >= -0.005)).sum())
 
-            # Step 4: Per-ticker quality filter
-            tkr = row.get("ticker", "")
-            if tkr in ticker_track:
-                t = ticker_track[tkr]
-                if t["total"] >= 3 and t["wins"] / t["total"] < 0.35:
-                    # This ticker has been consistently wrong → skip
-                    portfolio["skipped_ticker"] += 1
-                    continue
+        buy_actuals = actuals[buy_mask].dropna()
+        sell_actuals = actuals[sell_mask].dropna()
 
-            position_size = min(0.30, max(0.10, 0.10 + confidence * 2.0))
+        hb_win = int((buy_actuals > 0).sum())
+        hs_win = int((sell_actuals < 0).sum())
 
-        elif signal_mode == "combined":
-            # COMBINED: both must agree, skip on disagreement
-            if meta_signal == "HOLD" or hybrid_signal == "HOLD":
-                continue
-            if meta_signal != hybrid_signal:
-                portfolio["skipped_disagreement"] += 1
-                continue
-            trade_signal = meta_signal  # they agree
-            position_size = min(0.30, max(0.10, 0.10 + confidence * 2.0))
-        elif signal_mode == "meta":
-            if meta_signal == "HOLD":
-                continue
-            trade_signal = meta_signal
-            position_size = 0.20
-        elif signal_mode == "hybrid":
-            if hybrid_signal == "HOLD":
-                continue
-            trade_signal = hybrid_signal
-            position_size = 0.20
-        else:
-            continue
+        hb_avg_ret = float(buy_actuals.mean() * 100.0) if not buy_actuals.empty else 0.0
+        hs_avg_ret = float(sell_actuals.mean() * 100.0) if not sell_actuals.empty else 0.0
 
-        portfolio["trades"] += 1
-        tkr = row.get("ticker", "")
+        hb_win_rate = (hb_win / max(1, hybrid_buy_count)) * 100.0
+        hs_win_rate = (hs_win / max(1, hybrid_sell_count)) * 100.0
 
-        if trade_signal == "BUY":
-            pnl = actual * position_size
-            portfolio["buy_trades"] += 1
-            if actual > 0:
-                portfolio["buy_wins"] += 1
-        elif trade_signal == "SELL":
-            pnl = -actual * position_size
-            portfolio["sell_trades"] += 1
-            if actual < 0:
-                portfolio["sell_wins"] += 1
-        else:
-            continue
+        # Meta Signal Deep Dive
+        meta_accuracy = "N/A"
+        meta_buy_count = meta_sell_count = meta_hold_count = 0
+        meta_buy_win = meta_sell_win = 0
+        meta_buy_avg_ret = meta_sell_avg_ret = None
 
-        # Slippage (0.15%) + commission (0.09%)
-        pnl -= 0.0024
+        if meta_col in df_valid.columns:
+            metas = df_valid[meta_col].fillna("HOLD").astype(str)
+            meta_buy_count = int((metas == "BUY").sum())
+            meta_sell_count = int((metas == "SELL").sum())
+            meta_hold_count = int((metas == "HOLD").sum())
 
-        new_eq = portfolio["equity"][-1] * (1 + pnl)
-        portfolio["equity"].append(new_eq)
+            def meta_matches(row):
+                m = row.get(meta_col, "HOLD")
+                a = row.get(actual_col, np.nan)
+                if pd.isna(a): return False
+                if m == "BUY" and a > 0: return True
+                if m == "SELL" and a < 0: return True
+                if m == "HOLD" and abs(a) <= 0.005: return True
+                return False
 
-        if pnl > 0:
-            portfolio["wins"] += 1
-            if tkr:
-                ticker_track.setdefault(tkr, {"wins": 0, "total": 0})
-                ticker_track[tkr]["wins"] += 1
-                ticker_track[tkr]["total"] += 1
-        else:
-            portfolio["losses"] += 1
-            if tkr:
-                ticker_track.setdefault(tkr, {"wins": 0, "total": 0})
-                ticker_track[tkr]["total"] += 1
+            matched = df_valid.apply(meta_matches, axis=1)
+            meta_accuracy = f"{round(float(matched.sum() / max(1, len(df_valid)) * 100.0), 1)}%"
 
-    eq = np.array(portfolio["equity"])
-    returns = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
+            if meta_buy_count > 0 and actual_col in df_valid.columns:
+                mb_actuals = df_valid.loc[df_valid[meta_col] == "BUY", actual_col].dropna().astype(float)
+                meta_buy_win = int((mb_actuals > 0).sum())
+                meta_buy_avg_ret = float(mb_actuals.mean() * 100.0) if not mb_actuals.empty else 0.0
+            if meta_sell_count > 0 and actual_col in df_valid.columns:
+                ms_actuals = df_valid.loc[df_valid[meta_col] == "SELL", actual_col].dropna().astype(float)
+                meta_sell_win = int((ms_actuals < 0).sum())
+                meta_sell_avg_ret = float(ms_actuals.mean() * 100.0) if not ms_actuals.empty else 0.0
 
-    total_ret = (eq[-1] / eq[0] - 1) * 100
-    max_dd = np.min(eq / np.maximum.accumulate(eq) - 1) * 100 if len(eq) > 1 else 0
-    sharpe = (np.mean(returns) / (np.std(returns) + 1e-9)) * np.sqrt(52) if len(returns) > 1 else 0
-    win_rate = portfolio["wins"] / max(1, portfolio["trades"]) * 100
+        metrics[h] = {
+            "n_samples": int(n_samples),
+            "directional_accuracy": round(float(directional_accuracy), 1),
+            "mae_pct": round(float(mae_pct), 2),
+            "correlation": round(float(corr) if not pd.isna(corr) else 0.0, 3),
+            "mean_predicted_pct": round(float(mean_pred), 1),
+            "mean_actual_pct": round(float(mean_actual), 1),
 
-    buy_wr = portfolio["buy_wins"] / max(1, portfolio["buy_trades"]) * 100
-    sell_wr = portfolio["sell_wins"] / max(1, portfolio["sell_trades"]) * 100
+            "hybrid_buy_count": hybrid_buy_count,
+            "hybrid_buy_win_rate": round(hb_win_rate, 1),
+            "hybrid_buy_avg_ret": round(hb_avg_ret, 2),
+            "hybrid_sell_count": hybrid_sell_count,
+            "hybrid_sell_win_rate": round(hs_win_rate, 1),
+            "hybrid_sell_avg_ret": round(hs_avg_ret, 2),
+            "hybrid_hold_count": hybrid_hold_count,
+
+            "meta_accuracy": meta_accuracy,
+            "meta_buy_count": int(meta_buy_count),
+            "meta_buy_win_rate": f"{round(meta_buy_win / max(1, meta_buy_count) * 100.0, 1)}%" if meta_buy_count > 0 else "N/A",
+            "meta_buy_avg_ret": (round(meta_buy_avg_ret, 2) if meta_buy_avg_ret is not None else "N/A"),
+            "meta_sell_count": int(meta_sell_count),
+            "meta_sell_win_rate": f"{round(meta_sell_win / max(1, meta_sell_count) * 100.0, 1)}%" if meta_sell_count > 0 else "N/A",
+            "meta_sell_avg_ret": (round(meta_sell_avg_ret, 2) if meta_sell_avg_ret is not None else "N/A"),
+            "meta_hold_count": int(meta_hold_count)
+        }
+    return metrics
+
+
+# ------------------ PORTFOLIO SIM & LEDGER ------------------
+
+def compute_portfolio_metrics(results_df, trade_horizon=5):
+    def _run_portfolio_sim(results_df, signal_mode="combined", label=""):
+        portfolio = {"equity": [100.0], "trades": 0, "wins": 0, "losses": 0, "buy_trades": 0, "sell_trades": 0,
+                     "buy_wins": 0, "sell_wins": 0, "skipped_disagreement": 0, "regime_overrides": 0,
+                     "skipped_confidence": 0, "skipped_horizon": 0, "skipped_ticker": 0}
+
+        actual_col = f"actual_ret_{trade_horizon}d"
+        meta_col = f"meta_signal_{trade_horizon}d"
+        pred_col = f"pred_ret_{trade_horizon}d"
+        conf_col = f"meta_confidence_{trade_horizon}d"
+        regime_col = "hmm_regime"
+        alt_horizon = 21 if trade_horizon == 5 else 5
+
+        trade_log = []  # The Ledger
+
+        if actual_col not in results_df.columns:
+            return {"label": label, "total_return_pct": 0.0, "max_drawdown_pct": 0.0, "sharpe_ratio": 0.0,
+                    "total_trades": 0, "buy_trades": 0, "sell_trades": 0, "win_rate_pct": 0.0, "buy_win_rate_pct": 0.0,
+                    "sell_win_rate_pct": 0.0, "final_equity": 100.0, "trade_log": []}
+
+        df = results_df.dropna(subset=[actual_col]).copy()
+        if meta_col not in df.columns or pred_col not in df.columns:
+            return {"label": label, "total_return_pct": 0.0, "max_drawdown_pct": 0.0, "sharpe_ratio": 0.0,
+                    "total_trades": 0, "buy_trades": 0, "sell_trades": 0, "win_rate_pct": 0.0, "buy_win_rate_pct": 0.0,
+                    "sell_win_rate_pct": 0.0, "final_equity": 100.0, "trade_log": []}
+
+        df = df.dropna(subset=[meta_col, pred_col]).sort_values("sim_date")
+
+        ticker_track, current_positions, current_equity = {}, {}, 100.0
+        prev_macro_regime = "NEUTRAL"
+        grouped = df.groupby("sim_date")
+
+        for sim_date, group in grouped:
+            target_weights, ticker_alloc_info = {}, {}
+
+            current_macro = group[regime_col].mode()[0] if regime_col in df.columns and not group[
+                regime_col].empty else "NEUTRAL"
+            if pd.isna(current_macro): current_macro = "NEUTRAL"
+            if current_macro != prev_macro_regime:
+                ticker_track.clear()
+                prev_macro_regime = current_macro
+
+            for _, row in group.iterrows():
+                tkr = row.get("ticker", "")
+                meta_signal, hybrid_ret, actual = row[meta_col], row[pred_col], row[actual_col]
+                confidence = row.get(conf_col, 0.05)
+                if pd.isna(confidence): confidence = 0.05
+
+                hybrid_signal = "BUY" if hybrid_ret > 0.005 else "SELL" if hybrid_ret < -0.005 else "HOLD"
+                trade_signal, raw_weight, is_override = "HOLD", 0.0, False
+                regime = row.get(regime_col, "NEUTRAL") if regime_col in df.columns else "NEUTRAL"
+                if pd.isna(regime): regime = "NEUTRAL"
+
+                if signal_mode == "regime":
+                    if regime == "BULL":
+                        if meta_signal == "BUY" or hybrid_signal == "BUY":
+                            trade_signal = "BUY"
+                        elif meta_signal == "SELL" and hybrid_signal == "SELL":
+                            trade_signal = "SELL"
+                    elif regime == "BEAR":
+                        if meta_signal == "SELL" or hybrid_signal == "SELL":
+                            trade_signal = "SELL"
+                        elif meta_signal == "BUY" and hybrid_signal == "BUY":
+                            trade_signal = "BUY"
+                    else:
+                        if meta_signal == hybrid_signal and meta_signal != "HOLD": trade_signal = meta_signal
+                    raw_weight = min(0.30, max(0.10, 0.10 + confidence * 2.0))
+
+                elif signal_mode == "combined_plus":
+                    if regime == "BULL":
+                        if meta_signal == "BUY" or hybrid_signal == "BUY":
+                            trade_signal = "BUY"
+                            if meta_signal != "BUY": is_override = True
+                        elif meta_signal == "SELL" and hybrid_signal == "SELL" and confidence >= 0.05:
+                            trade_signal = "SELL"
+                    elif regime == "BEAR":
+                        if (meta_signal == "SELL" or hybrid_signal == "SELL") and confidence >= 0.05:
+                            trade_signal = "SELL"
+                            if meta_signal != "SELL": is_override = True
+                        elif meta_signal == "BUY" and hybrid_signal == "BUY":
+                            trade_signal = "BUY"
+                    else:
+                        if meta_signal == hybrid_signal and meta_signal != "HOLD":
+                            if not (meta_signal == "SELL" and confidence < 0.05): trade_signal = meta_signal
+                        elif meta_signal != hybrid_signal and meta_signal != "HOLD" and hybrid_signal != "HOLD":
+                            portfolio["skipped_disagreement"] += 1
+
+                    if trade_signal != "HOLD" and not is_override:
+                        if confidence < 0.08:
+                            portfolio["skipped_confidence"] += 1
+                            continue
+                        meta_alt = row.get(f"meta_signal_{alt_horizon}d", "HOLD")
+                        if pd.isna(meta_alt): meta_alt = "HOLD"
+                        if (trade_signal == "BUY" and meta_alt == "SELL") or (
+                                trade_signal == "SELL" and meta_alt == "BUY"):
+                            portfolio["skipped_horizon"] += 1
+                            continue
+
+                    if trade_signal != "HOLD" and tkr in ticker_track:
+                        t = ticker_track[tkr]
+                        if t["total"] >= 3 and t["wins"] / t["total"] < 0.35:
+                            portfolio["skipped_ticker"] += 1
+                            continue
+
+                    eff_conf = max(confidence, 0.15) if is_override else confidence
+                    raw_weight = 0.10 + eff_conf * 2.0
+
+                elif signal_mode == "combined":
+                    if meta_signal == hybrid_signal and meta_signal != "HOLD":
+                        trade_signal = meta_signal
+                        raw_weight = 0.10 + confidence * 2.0
+                    elif meta_signal != "HOLD" and hybrid_signal != "HOLD":
+                        portfolio["skipped_disagreement"] += 1
+                elif signal_mode == "meta":
+                    if meta_signal != "HOLD": trade_signal, raw_weight = meta_signal, 0.20
+                elif signal_mode == "hybrid":
+                    if hybrid_signal != "HOLD": trade_signal, raw_weight = hybrid_signal, 0.20
+
+                if trade_signal != "HOLD":
+                    risk_adj_weight = min(raw_weight / max(abs(hybrid_ret), 0.01), 5.0)
+                    target_weights[tkr] = -risk_adj_weight if trade_signal == "SELL" else risk_adj_weight
+                    ticker_alloc_info[tkr] = {"signal": trade_signal, "actual_fwd_ret": actual,
+                                              "close_px": row.get("close_at_sim", 0.0)}
+
+            total_abs_weight = sum(abs(w) for w in target_weights.values())
+            if total_abs_weight > 0.0:
+                scale_factor = 1.0 / max(1.0, total_abs_weight)
+                for tkr in target_weights: target_weights[tkr] *= scale_factor
+
+            date_pnl = 0.0
+            all_tickers = set(current_positions.keys()).union(set(target_weights.keys()))
+
+            for tkr in all_tickers:
+                old_w, new_w = current_positions.get(tkr, 0.0), target_weights.get(tkr, 0.0)
+                weight_diff = new_w - old_w
+                fee = weight_diff * TOTAL_BUY_FEE_PCT if weight_diff > 0 else abs(
+                    weight_diff) * TOTAL_SELL_FEE_PCT if weight_diff < 0 else 0.0
+                date_pnl -= fee
+
+                if new_w != 0.0:
+                    info = ticker_alloc_info[tkr]
+                    trade_sig, actual_ret, close_px = info["signal"], info["actual_fwd_ret"], info["close_px"]
+                    trade_pnl = abs(new_w) * actual_ret if new_w > 0 else abs(new_w) * -actual_ret
+                    date_pnl += trade_pnl
+
+                    # --- LEDGER ENTRY ---
+                    trade_log.append({
+                        "Date": sim_date.strftime("%Y-%m-%d"),
+                        "Ticker": tkr,
+                        "Action": trade_sig,
+                        "Price": round(close_px, 2),
+                        "Alloc_Pct": round(abs(new_w) * 100, 2),
+                        "Fwd_Ret_Pct": round(actual_ret * 100, 2),
+                        "PnL_Impact": round(trade_pnl * 100, 4)
+                    })
+
+                    portfolio["trades"] += 1
+                    if trade_sig == "BUY":
+                        portfolio["buy_trades"] += 1
+                        if actual_ret > 0: portfolio["buy_wins"] += 1
+                    elif trade_sig == "SELL":
+                        portfolio["sell_trades"] += 1
+                        if actual_ret < 0: portfolio["sell_wins"] += 1
+
+                    ticker_track.setdefault(tkr, {"wins": 0, "total": 0})
+                    ticker_track[tkr]["total"] += 1
+                    if trade_pnl > 0:
+                        portfolio["wins"] += 1
+                        ticker_track[tkr]["wins"] += 1
+                    else:
+                        portfolio["losses"] += 1
+
+            current_positions = target_weights
+            current_equity *= (1.0 + date_pnl)
+            portfolio["equity"].append(current_equity)
+
+        eq = np.array(portfolio["equity"])
+        returns = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
+        total_ret = (eq[-1] / eq[0] - 1) * 100
+        max_dd = np.min(eq / np.maximum.accumulate(eq) - 1) * 100 if len(eq) > 1 else 0
+        sharpe = (np.mean(returns) / (np.std(returns) + 1e-9)) * np.sqrt(52) if len(returns) > 1 else 0
+
+        return {
+            "label": label, "total_return_pct": round(total_ret, 2), "max_drawdown_pct": round(max_dd, 2),
+            "sharpe_ratio": round(sharpe, 2),
+            "total_trades": portfolio["trades"], "buy_trades": portfolio["buy_trades"],
+            "sell_trades": portfolio["sell_trades"],
+            "win_rate_pct": round(portfolio["wins"] / max(1, portfolio["trades"]) * 100, 1),
+            "buy_win_rate_pct": round(portfolio["buy_wins"] / max(1, portfolio["buy_trades"]) * 100, 1) if portfolio[
+                                                                                                               "buy_trades"] > 0 else 0.0,
+            "sell_win_rate_pct": round(portfolio["sell_wins"] / max(1, portfolio["sell_trades"]) * 100, 1) if portfolio[
+                                                                                                                  "sell_trades"] > 0 else 0.0,
+            "final_equity": round(eq[-1], 2), "skipped_disagreement": portfolio["skipped_disagreement"],
+            "regime_overrides": portfolio.get("regime_overrides", 0),
+            "skipped_confidence": portfolio.get("skipped_confidence", 0),
+            "skipped_horizon": portfolio.get("skipped_horizon", 0),
+            "skipped_ticker": portfolio.get("skipped_ticker", 0),
+            "trade_log": trade_log
+        }
 
     return {
-        "label": label,
-        "total_return_pct": round(total_ret, 2),
-        "max_drawdown_pct": round(max_dd, 2),
-        "sharpe_ratio": round(sharpe, 2),
-        "total_trades": portfolio["trades"],
-        "buy_trades": portfolio["buy_trades"],
-        "sell_trades": portfolio["sell_trades"],
-        "win_rate_pct": round(win_rate, 1),
-        "buy_win_rate_pct": round(buy_wr, 1),
-        "sell_win_rate_pct": round(sell_wr, 1),
-        "final_equity": round(eq[-1], 2),
-        "skipped_disagreement": portfolio["skipped_disagreement"],
-        "regime_overrides": portfolio.get("regime_overrides", 0),
-        "skipped_confidence": portfolio.get("skipped_confidence", 0),
-        "skipped_horizon": portfolio.get("skipped_horizon", 0),
-        "skipped_ticker": portfolio.get("skipped_ticker", 0),
+        "meta_only": _run_portfolio_sim(results_df, "meta", "META-ONLY"),
+        "combined": _run_portfolio_sim(results_df, "combined", "COMBINED"),
+        "hybrid_only": _run_portfolio_sim(results_df, "hybrid", "HYBRID-ONLY"),
+        "regime_aware": _run_portfolio_sim(results_df, "regime", "REGIME-AWARE"),
+        "combined_plus": _run_portfolio_sim(results_df, "combined_plus", "COMBINED+")
     }
 
 
-def _empty_portfolio():
-    return {
-        "label": "", "total_return_pct": 0.0, "max_drawdown_pct": 0.0, "sharpe_ratio": 0.0,
-        "total_trades": 0, "buy_trades": 0, "sell_trades": 0,
-        "win_rate_pct": 0.0, "buy_win_rate_pct": 0.0, "sell_win_rate_pct": 0.0,
-        "final_equity": 100.0, "skipped_disagreement": 0, "regime_overrides": 0,
-        "skipped_confidence": 0, "skipped_horizon": 0, "skipped_ticker": 0,
-    }
+def compute_per_ticker_stats(results_df, trade_horizon=5):
+    """Generates the per-ticker performance summary for the specified horizon."""
+    actual_col = f"actual_ret_{trade_horizon}d"
+    pred_col = f"pred_ret_{trade_horizon}d"
+    meta_col = f"meta_signal_{trade_horizon}d"
+
+    if actual_col not in results_df.columns: return pd.DataFrame()
+    df_valid = results_df.dropna(subset=[pred_col, actual_col]).copy()
+    if df_valid.empty: return pd.DataFrame()
+
+    def get_dir_acc(g):
+        sign_eq = np.sign(g[pred_col]) == np.sign(g[actual_col])
+        return round((sign_eq.sum() / len(g)) * 100)
+
+    def get_meta_acc(g):
+        if meta_col not in g.columns: return "N/A"
+
+        def match(row):
+            m, a = row[meta_col], row[actual_col]
+            if m == "BUY" and a > 0: return True
+            if m == "SELL" and a < 0: return True
+            if m == "HOLD" and abs(a) <= 0.005: return True
+            return False
+
+        return round((g.apply(match, axis=1).sum() / len(g)) * 100)
+
+    stats = []
+    for tkr, group in df_valid.groupby("ticker"):
+        stats.append({
+            "Ticker": tkr,
+            "N": len(group),
+            "DirAcc": get_dir_acc(group),
+            "MetaAcc": get_meta_acc(group),
+            "Pred": round(group[pred_col].mean() * 100, 1),
+            "Actual": round(group[actual_col].mean() * 100, 1),
+            "HMM Mode": group["hmm_regime"].mode()[0] if "hmm_regime" in group.columns else "NEUTRAL"
+        })
+    return pd.DataFrame(stats).sort_values("Ticker").reset_index(drop=True)
 
 
-# ===============================================================
-# PRINT REPORT
-# ===============================================================
+# ------------------ REPORT ------------------
 
-def print_report(metrics, portfolio_metrics, results_df, n_tickers, n_sim_dates, oos_start, oos_end):
+def print_report(metrics, portfolio_metrics, results_df, n_tickers, n_sim_dates, oos_start, oos_end, trade_horizon=5):
     print("\n" + "=" * 80)
     print("  ChronoStox v9.5 — OUT-OF-SAMPLE BACKTEST REPORT (Combined+ Edition)")
     print("=" * 80)
@@ -874,463 +614,447 @@ def print_report(metrics, portfolio_metrics, results_df, n_tickers, n_sim_dates,
     print(f"  Simulation Pts: {n_sim_dates}")
     print("-" * 80)
 
-    # === HYBRID RETURNS TABLE ===
     print(f"\n  HYBRID PRICE TARGET ANALYSIS (bidirectional ATR):")
-    print(f"  {'HORIZON':<8} | {'N':<5} | {'DIR ACC':<8} | {'MAE%':<7} | {'CORR':<6} | {'Pred→Act':<18} | {'BUY':<5} | {'SELL':<5} | {'HOLD':<5}")
+    print(
+        f"  {'HORIZON':<8} | {'N':<5} | {'DIR ACC':<8} | {'MAE%':<7} | {'CORR':<6} | {'Pred→Act':<18} | {'BUY':<5} | {'SELL':<5} | {'HOLD':<5}")
     print("  " + "-" * 88)
 
     for h in HORIZONS:
-        if h not in metrics:
-            print(f"  {h}d       | —")
-            continue
+        if h not in metrics: continue
         m = metrics[h]
+        if m['n_samples'] == 0:
+            print(f"  {str(h) + 'd':<8} | —")
+            continue
         pred_act = f"{m['mean_predicted_pct']:+.1f}→{m['mean_actual_pct']:+.1f}%"
         print(
-            f"  {str(h) + 'd':<8} | "
-            f"{m['n_samples']:<5} | "
-            f"{m['directional_accuracy']:>5.1f}%  | "
-            f"{m['mae_pct']:>5.2f}% | "
-            f"{m['correlation']:>5.3f} | "
-            f"{pred_act:<18} | "
-            f"{m['hybrid_buy_count']:<5} | "
-            f"{m['hybrid_sell_count']:<5} | "
-            f"{m['hybrid_hold_count']:<5}"
-        )
+            f"  {str(h) + 'd':<8} | {m['n_samples']:<5} | {m['directional_accuracy']:>5.1f}%  | {m['mae_pct']:>5.2f}% | {m['correlation']:>5.3f} | {pred_act:<18} | {m['hybrid_buy_count']:<5} | {m['hybrid_sell_count']:<5} | {m['hybrid_hold_count']:<5}")
 
-    # === META-LEARNER TABLE ===
     print(f"\n  META-LEARNER SIGNAL ANALYSIS:")
-    print(f"  {'HORIZON':<8} | {'META ACC':<9} | {'BUY':<5} | {'BUY WR':<7} | {'BUY Avg':<8} | {'SELL':<5} | {'SELL WR':<8} | {'SELL Avg':<9} | {'HOLD':<5}")
+    print(
+        f"  {'HORIZON':<8} | {'META ACC':<9} | {'BUY':<5} | {'BUY WR':<7} | {'BUY Avg':<8} | {'SELL':<5} | {'SELL WR':<8} | {'SELL Avg':<9} | {'HOLD':<5}")
     print("  " + "-" * 92)
 
     for h in HORIZONS:
-        if h not in metrics:
-            print(f"  {h}d       | —")
-            continue
+        if h not in metrics: continue
         m = metrics[h]
-        ma = m['meta_accuracy']
-        ma_str = f"{ma}%" if ma != "N/A" else "N/A"
-        bwr = m['meta_buy_win_rate']
-        bwr_str = f"{bwr}%" if bwr != "N/A" else "N/A"
-        swr = m['meta_sell_win_rate']
-        swr_str = f"{swr}%" if swr != "N/A" else "N/A"
-        bar = m['meta_buy_avg_ret']
-        bar_str = f"{bar:+.2f}%" if bar != "N/A" else "N/A"
-        sar = m['meta_sell_avg_ret']
-        sar_str = f"{sar:+.2f}%" if sar != "N/A" else "N/A"
+        if m['n_samples'] == 0:
+            print(f"  {str(h) + 'd':<8} | —")
+            continue
+
+        mb_avg = m.get('meta_buy_avg_ret', 'N/A')
+        ms_avg = m.get('meta_sell_avg_ret', 'N/A')
+        mb_str = f"{mb_avg:>+6.2f}%" if isinstance(mb_avg, float) else f"{mb_avg:>7}"
+        ms_str = f"{ms_avg:>+6.2f}%" if isinstance(ms_avg, float) else f"{ms_avg:>8}"
 
         print(
-            f"  {str(h) + 'd':<8} | "
-            f"{ma_str:<9} | "
-            f"{m['meta_buy_count']:<5} | "
-            f"{bwr_str:<7} | "
-            f"{bar_str:<8} | "
-            f"{m['meta_sell_count']:<5} | "
-            f"{swr_str:<8} | "
-            f"{sar_str:<9} | "
-            f"{m['meta_hold_count']:<5}"
-        )
+            f"  {str(h) + 'd':<8} | {m['meta_accuracy']:<9} | {m.get('meta_buy_count', 0):<5} | {m.get('meta_buy_win_rate', 'N/A'):<7} | {mb_str:<8} | {m.get('meta_sell_count', 0):<5} | {m.get('meta_sell_win_rate', 'N/A'):<8} | {ms_str:<9} | {m.get('meta_hold_count', 0):<5}")
 
-    # Per-horizon detailed
     print("\n" + "-" * 80)
     print("  DETAILED BREAKDOWN:")
     print("-" * 80)
     for h in HORIZONS:
-        if h not in metrics:
-            continue
+        if h not in metrics or metrics[h]['n_samples'] == 0: continue
         m = metrics[h]
+
+        hb_avg = m.get('hybrid_buy_avg_ret', 0.0)
+        hs_avg = m.get('hybrid_sell_avg_ret', 0.0)
+        mb_avg = m.get('meta_buy_avg_ret', 'N/A')
+        ms_avg = m.get('meta_sell_avg_ret', 'N/A')
+        mb_str = f"{mb_avg:+.2f}%" if isinstance(mb_avg, float) else str(mb_avg)
+        ms_str = f"{ms_avg:+.2f}%" if isinstance(ms_avg, float) else str(ms_avg)
+
         print(f"\n  {h}-DAY HORIZON:")
         print(f"    Samples           : {m['n_samples']}")
         print(f"    Hybrid Dir. Acc   : {m['directional_accuracy']}%")
         print(f"    MAE               : {m['mae_pct']}%")
         print(f"    Pred vs Actual    : {m['mean_predicted_pct']}% predicted → {m['mean_actual_pct']}% actual")
         print(f"    --- Hybrid Signals ---")
-        print(f"    BUY  : {m['hybrid_buy_count']} (win rate: {m['hybrid_buy_win_rate']}%, avg ret: {m['hybrid_buy_avg_ret']}%)")
-        print(f"    SELL : {m['hybrid_sell_count']} (win rate: {m['hybrid_sell_win_rate']}%, avg ret: {m['hybrid_sell_avg_ret']}%)")
+        print(f"    BUY  : {m['hybrid_buy_count']} (win rate: {m['hybrid_buy_win_rate']}%, avg ret: {hb_avg:+.2f}%)")
+        print(f"    SELL : {m['hybrid_sell_count']} (win rate: {m['hybrid_sell_win_rate']}%, avg ret: {hs_avg:+.2f}%)")
         print(f"    HOLD : {m['hybrid_hold_count']}")
         print(f"    --- Meta-Learner ---")
-        if m['meta_accuracy'] != 'N/A':
-            print(f"    Meta Accuracy     : {m['meta_accuracy']}%")
-        print(f"    Meta BUY  : {m['meta_buy_count']} (win rate: {m['meta_buy_win_rate']}%, avg ret: {m['meta_buy_avg_ret']}%)")
-        print(f"    Meta SELL : {m['meta_sell_count']} (win rate: {m['meta_sell_win_rate']}%, avg ret: {m['meta_sell_avg_ret']}%)")
+        print(f"    Meta Accuracy     : {m['meta_accuracy']}")
+        print(f"    Meta BUY  : {m['meta_buy_count']} (win rate: {m['meta_buy_win_rate']}, avg ret: {mb_str})")
+        print(f"    Meta SELL : {m['meta_sell_count']} (win rate: {m['meta_sell_win_rate']}, avg ret: {ms_str})")
         print(f"    Meta HOLD : {m['meta_hold_count']}")
 
-    # Portfolio comparison
     print("\n" + "-" * 80)
-    print("  PORTFOLIO STRATEGY COMPARISON (21d horizon):")
+    print(f"  PORTFOLIO STRATEGY COMPARISON ({trade_horizon}d horizon):")
     print("-" * 80)
-    print(f"  {'Strategy':<18} | {'Return':>8} | {'MaxDD':>8} | {'Sharpe':>7} | {'Trades':>7} | {'Win%':>6} | {'Equity':>9}")
+    print(
+        f"  {'Strategy':<18} | {'Return':>8} | {'MaxDD':>8} | {'Sharpe':>7} | {'Trades':>15} | {'Win%':>6} | {'Equity':>9}")
     print("  " + "-" * 80)
 
-    # Order: regime first (recommended), then combined, meta, hybrid
-    for key in ["adaptive", "combined_plus", "combined", "regime_aware", "meta_only", "hybrid_only"]:
-        pm = portfolio_metrics.get(key, _empty_portfolio())
-        label = {
-            "adaptive": "\u2b50 ADAPTIVE",
-            "combined_plus": "   COMBINED+",
-            "combined": "   COMBINED",
-            "regime_aware": "   REGIME-AWARE",
-            "meta_only": "   META-ONLY",
-            "hybrid_only": "   HYBRID-ONLY"
-        }.get(key, key)
-        trades_str = f"{pm['total_trades']} ({pm['buy_trades']}B/{pm['sell_trades']}S)"
+    for key in ["combined_plus", "combined", "regime_aware", "meta_only", "hybrid_only"]:
+        pm = portfolio_metrics.get(key, {"final_equity": 100.0, "total_trades": 0, "buy_trades": 0, "sell_trades": 0,
+                                         "total_return_pct": 0.0, "max_drawdown_pct": 0.0, "sharpe_ratio": 0.0,
+                                         "win_rate_pct": 0.0})
+        label = {"combined_plus": "⭐ COMBINED+", "combined": "   COMBINED", "regime_aware": "   REGIME-AWARE",
+                 "meta_only": "   META-ONLY", "hybrid_only": "   HYBRID-ONLY"}.get(key, key)
+        trades_str = f"{pm['total_trades']} ({pm.get('buy_trades', 0)}B/{pm.get('sell_trades', 0)}S)"
         print(
-            f"  {label:<18} | "
-            f"{pm['total_return_pct']:>+7.1f}% | "
-            f"{pm['max_drawdown_pct']:>+7.1f}% | "
-            f"{pm['sharpe_ratio']:>+6.2f} | "
-            f"{trades_str:>7} | "
-            f"{pm['win_rate_pct']:>5.1f}% | "
-            f"\u20b9{pm['final_equity']:>7.2f}"
-        )
+            f"  {label:<18} | {pm['total_return_pct']:>+7.1f}% | {pm['max_drawdown_pct']:>+7.1f}% | {pm['sharpe_ratio']:>+6.2f} | {trades_str:>15} | {pm['win_rate_pct']:>5.1f}% | \u20b9{pm['final_equity']:>7.2f}")
 
-    # Detail on COMBINED+
-    cp = portfolio_metrics.get("combined_plus", _empty_portfolio())
-    print(f"\n  \u2b50 COMBINED+ STRATEGY DETAILS:")
-    print(f"    Base             : Combined (hybrid + meta 21d must agree)")
-    print(f"    + Confidence     : meta gap \u2265 0.08 required")
-    print(f"    + Multi-horizon  : 5d meta must not contradict 21d direction")
-    print(f"    + Ticker quality : skip ticker if win rate < 35% after 3+ trades")
-    print(f"    Position Sizing  : 10-30% (confidence-based)")
-    print(f"    Skipped (disagree)  : {cp.get('skipped_disagreement', 0)}")
-    print(f"    Skipped (low conf)  : {cp.get('skipped_confidence', 0)}")
-    print(f"    Skipped (horizon)   : {cp.get('skipped_horizon', 0)}")
-    print(f"    Skipped (bad ticker): {cp.get('skipped_ticker', 0)}")
-    print(f"    Buy Win Rate     : {cp['buy_win_rate_pct']}%")
-    print(f"    Sell Win Rate    : {cp['sell_win_rate_pct']}%")
+    cp = portfolio_metrics.get("combined_plus", {})
+    if cp:
+        alt_horizon = 21 if trade_horizon == 5 else 5
+        print("\n  ⭐ COMBINED+ STRATEGY DETAILS:")
+        print(f"    Base             : Combined (hybrid + meta {trade_horizon}d must agree)")
+        print("    + Confidence     : meta gap ≥ 0.08 required")
+        print(f"    + Multi-horizon  : {alt_horizon}d meta must not contradict {trade_horizon}d direction")
+        print("    + Ticker quality : skip ticker if win rate < 35% after 3+ trades")
+        print("    Position Sizing  : 10-30% (confidence-based)")
+        print(f"    Skipped (disagree)  : {cp.get('skipped_disagreement', 0)}")
+        print(f"    Skipped (low conf)  : {cp.get('skipped_confidence', 0)}")
+        print(f"    Skipped (horizon)   : {cp.get('skipped_horizon', 0)}")
+        print(f"    Skipped (bad ticker): {cp.get('skipped_ticker', 0)}")
+        print(f"    Buy Win Rate     : {cp.get('buy_win_rate_pct', 0.0)}%")
+        print(f"    Sell Win Rate    : {cp.get('sell_win_rate_pct', 0.0)}%")
 
-    # Per-ticker performance (21d horizon)
-    if "actual_ret_21d" in results_df.columns and "pred_ret_21d" in results_df.columns:
-        print("\n" + "-" * 80)
-        print("  PER-TICKER 21d PERFORMANCE:")
-        print("-" * 80)
-        print(f"  {'Ticker':<18} | {'N':>3} | {'DirAcc':>6} | {'MetaAcc':>7} | {'Pred':>6} | {'Actual':>7} | {'HMM Mode':>9}")
-        print("  " + "-" * 72)
-
-        df21 = results_df.dropna(subset=["actual_ret_21d", "pred_ret_21d"])
-        for tkr in sorted(df21["ticker"].unique()):
-            tdf = df21[df21["ticker"] == tkr]
-            n = len(tdf)
-            if n == 0:
-                continue
-            pred = tdf["pred_ret_21d"].values
-            actual = tdf["actual_ret_21d"].values
-            dir_acc = np.mean(np.sign(pred) == np.sign(actual)) * 100
-            avg_pred = np.mean(pred) * 100
-            avg_actual = np.mean(actual) * 100
-
-            # Meta accuracy for this ticker
-            meta_acc_str = "N/A"
-            if "meta_signal_21d" in tdf.columns:
-                mc = 0
-                mdf = tdf.dropna(subset=["meta_signal_21d"])
-                for _, r in mdf.iterrows():
-                    s, a = r["meta_signal_21d"], r["actual_ret_21d"]
-                    if (s == "BUY" and a > 0) or (s == "SELL" and a < 0) or (s == "HOLD" and abs(a) < 0.05):
-                        mc += 1
-                if len(mdf) > 0:
-                    meta_acc_str = f"{mc / len(mdf) * 100:.0f}%"
-
-            # Dominant HMM regime
-            hmm_str = "N/A"
-            if "hmm_regime" in tdf.columns:
-                regime_counts_tkr = tdf["hmm_regime"].value_counts()
-                if len(regime_counts_tkr) > 0:
-                    hmm_str = regime_counts_tkr.index[0]
-
-            short_tkr = tkr.replace(".NS", "")
+    print("\n" + "-" * 80)
+    print(f"  PER-TICKER {trade_horizon}d PERFORMANCE:")
+    print("-" * 80)
+    df_tkr = compute_per_ticker_stats(results_df, trade_horizon)
+    if not df_tkr.empty:
+        print(
+            f"  {'Ticker':<18} | {'N':>3} | {'DirAcc':>6} | {'MetaAcc':>7} | {'Pred':>6} | {'Actual':>7} | {'HMM Mode':>10}")
+        print("  " + "-" * 70)
+        # Print top 30 to terminal to avoid console spam
+        for _, row in df_tkr.head(30).iterrows():
             print(
-                f"  {short_tkr:<18} | "
-                f"{n:>3} | "
-                f"{dir_acc:>5.0f}% | "
-                f"{meta_acc_str:>7} | "
-                f"{avg_pred:>+5.1f}% | "
-                f"{avg_actual:>+6.1f}% | "
-                f"{hmm_str:>9}"
-            )
+                f"  {row['Ticker']:<18} | {row['N']:>3} | {row['DirAcc']:>5}% | {str(row['MetaAcc']) + '%':>7} | {row['Pred']:>5.1f}% | {row['Actual']:>6.1f}% | {row['HMM Mode']:>10}")
+        if len(df_tkr) > 30:
+            print(f"  ... (+ {len(df_tkr) - 30} more tickers. Full list saved to 'per_ticker_stats.csv')")
+        df_tkr.to_csv("per_ticker_stats.csv", index=False)
+
+    print("\n" + "-" * 80)
+    print("  LEDGER (COMBINED+) - RECENT TRADES:")
+    print("-" * 80)
+    trade_log = cp.get("trade_log", [])
+    if trade_log:
+        df_ledger = pd.DataFrame(trade_log)
+        print(
+            f"  {'Date':<10} | {'Ticker':<12} | {'Action':<6} | {'Price':>8} | {'Alloc%':>7} | {'FwdRet%':>8} | {'PnL Impact':>10}")
+        print("  " + "-" * 76)
+        # Print last 15 trades
+        for _, row in df_ledger.tail(15).iterrows():
+            print(
+                f"  {row['Date']:<10} | {row['Ticker']:<12} | {row['Action']:<6} | {row['Price']:>8.2f} | {row['Alloc_Pct']:>6.2f}% | {row['Fwd_Ret_Pct']:>+7.2f}% | {row['PnL_Impact']:>+10.4f}")
+        df_ledger.to_csv("combat_ledger.csv", index=False)
+        print(f"  \n  -> Full {len(df_ledger)}-trade ledger successfully dumped to 'combat_ledger.csv'")
+    else:
+        print("  No trades executed by COMBINED+ strategy in this period.")
 
     print("=" * 80)
 
 
-# ===============================================================
-# MAIN BACKTEST LOOP
-# ===============================================================
+# ------------------ BACKTEST ENGINE (FAST) ------------------
 
 def run_backtest(tickers, oos_start, oos_end, frequency="weekly"):
     t0 = time.time()
-
-    # --- Step 1: Load everything once ---
-    print("[1/6] Loading models...")
-    model_dir = "."
-    if not os.path.exists(os.path.join(".", MODEL_JOBLIB)):
-        if os.path.exists(os.path.join("../test", MODEL_JOBLIB)):
-            model_dir = "../test"
-        else:
-            print("FATAL: Cannot find model files.")
-            sys.exit(1)
-
+    print("[1/5] Loading models & global data...")
+    model_dir = "." if os.path.exists(os.path.join(".", MODEL_JOBLIB)) else "../test"
     models = load_models_once(model_dir)
     df_macro = load_macro_once(model_dir)
     df_senti = load_sentiment_once(model_dir)
     df_sector = load_sectors_once(model_dir)
-    print(f"  ✅ Models loaded ({len(models['features'])} features, seq_len={models['seq_len']})")
-    print(f"  ✅ Meta-learners: {list(models['meta_models'].keys()) if models['meta_models'] else 'NONE'}")
 
-    # --- Step 2: Fetch price history for all tickers ---
-    print(f"\n[2/6] Fetching price history for {len(tickers)} tickers...")
-    price_cache = {}
-    failed_tickers = []
+    scaler = models["scaler"]
+    lgbm_model = models["lgbm"]
+    lstm_model = models["lstm"]
+    meta_models = models.get("meta_models", {})
+    seq_len = models["seq_len"]
 
-    # Fetch from 2 years before OOS start to have enough history
+    print(f"\n[2/5] Fetching price history for {len(tickers)} tickers & Macro Proxy (^NSEI)...")
     fetch_start = (pd.to_datetime(oos_start) - pd.Timedelta(days=800)).strftime("%Y-%m-%d")
+    price_cache, precomputed_cache = {}, {}
+
+    nifty_df = fetch_price_history("^NSEI", start_date=fetch_start)
 
     for i, tkr in enumerate(tickers):
-        print(f"  [{i+1}/{len(tickers)}] {tkr}...", end=" ")
+        sys.stdout.write(f"\r  [{i + 1}/{len(tickers)}] Fetching {tkr:<15}")
+        sys.stdout.flush()
         df_px = fetch_price_history(tkr, start_date=fetch_start)
-        if df_px is not None and len(df_px) > 100:
-            price_cache[tkr] = df_px
-            print(f"✅ {len(df_px)} rows")
-        else:
-            failed_tickers.append(tkr)
-            print("❌ skipped")
+        if df_px is not None and len(df_px) > 100: price_cache[tkr] = df_px
 
-    if not price_cache:
-        print("FATAL: No ticker data fetched.")
-        sys.exit(1)
+    print(f"\n\n[3/5] PRE-COMPUTING Features to C-Memory (NumPy Arrays)...")
+    for i, (tkr, df_px) in enumerate(price_cache.items()):
+        sys.stdout.write(f"\r  [{i + 1}/{len(price_cache)}] Processing {tkr:<15}")
+        sys.stdout.flush()
+        df_feat = precompute_features(df_px, df_macro, df_senti, df_sector, models["features"])
+        if df_feat is not None:
+            precomputed_cache[tkr] = {
+                "dates": df_feat["Date"].values.astype('datetime64[D]'),
+                "features_np": df_feat[models["features"]].values.astype(np.float32),
+                "close_np": df_feat["Close"].values.astype(np.float32),
+                "atr_np": df_feat["ATR_final"].values.astype(np.float32),
+                "df": df_feat
+            }
 
-    print(f"  → {len(price_cache)} tickers ready, {len(failed_tickers)} failed")
-
-    # --- Step 3: Generate simulation dates ---
-    print(f"\n[3/6] Generating simulation dates ({frequency})...")
-    start_dt = pd.to_datetime(oos_start)
-    end_dt = pd.to_datetime(oos_end)
-
-    if frequency == "daily":
-        # Get actual trading days from any ticker's data
+    start_dt, end_dt = pd.to_datetime(oos_start), pd.to_datetime(oos_end)
+    if frequency == "daily" and len(price_cache) > 0:
         sample_tkr = list(price_cache.keys())[0]
         trading_days = price_cache[sample_tkr]["Date"]
         sim_dates = trading_days[(trading_days >= start_dt) & (trading_days <= end_dt)].tolist()
     else:
-        # Weekly (every Friday-ish)
-        all_dates = pd.date_range(start_dt, end_dt, freq="W-FRI")
-        sim_dates = all_dates.tolist()
+        sim_dates = pd.date_range(start_dt, end_dt, freq="W-FRI").tolist()
 
-    # Leave buffer at end for forward returns to materialize
-    today = pd.to_datetime(datetime.now().strftime("%Y-%m-%d"))
-    max_verify_date = {
-        5: today - pd.Timedelta(days=8),    # 5 trading days + buffer
-        21: today - pd.Timedelta(days=30),   # 21 trading days + buffer
-        63: today - pd.Timedelta(days=90),
-        126: today - pd.Timedelta(days=180),
-        252: today - pd.Timedelta(days=365),
-    }
+    max_verify_date = {h: pd.to_datetime(datetime.now().strftime("%Y-%m-%d")) - pd.Timedelta(days=h * 1.5) for h in
+                       HORIZONS}
 
-    print(f"  → {len(sim_dates)} simulation dates")
-
-    # --- Step 4: Run predictions ---
-    print(f"\n[4/6] Running predictions + HMM regime detection...")
+    print(f"\n\n[4/5] TENSOR BATCH INFERENCE ({len(sim_dates)} matrices)...")
     all_results = []
-    total_preds = len(sim_dates) * len(price_cache)
-    completed = 0
-    regime_counts = defaultdict(int)
-    
-    # Track short-term proxy errors for Adaptive Averaging
+    results_dict = {}
     proxy_errors = {}
-    proxy_errors_dates = {}
+
+    total_preds = len(sim_dates) * len(precomputed_cache)
+    completed = 0
 
     for sim_date in sim_dates:
-        for tkr, df_full_px in price_cache.items():
+        sim_date_np = np.datetime64(sim_date.date())
+        macro_regime = "NEUTRAL"
+        if nifty_df is not None:
+            nifty_slice = nifty_df[nifty_df["Date"] <= sim_date]
+            macro_regime = detect_regime_for_slice(nifty_slice)
+
+        batch_inputs = []
+
+        for tkr, cache in precomputed_cache.items():
+            idx = np.searchsorted(cache["dates"], sim_date_np, side='right') - 1
+            if idx < 100: continue
+
+            eval_date_np = np.datetime64((sim_date - pd.Timedelta(days=7)).date())
+            idx_past = np.searchsorted(cache["dates"], eval_date_np, side='right') - 1
+
+            dyn_weights = {"lgbm": 0.5, "lstm": 0.5}
+            if idx_past >= 100:
+                past_date_key = cache["dates"][idx_past]
+                past_res = results_dict.get((tkr, past_date_key))
+
+                if past_res:
+                    actual_ret_5d = (cache["close_np"][idx] - cache["close_np"][idx_past]) / cache["close_np"][idx_past]
+                    err_lgb = abs(actual_ret_5d - past_res.get("raw_ml_ret_5d_lgbm", 0.0))
+                    err_lstm = abs(actual_ret_5d - past_res.get("raw_ml_ret_5d_lstm", 0.0))
+
+                    proxy_errors.setdefault(tkr, []).append((err_lgb, err_lstm))
+                    if len(proxy_errors[tkr]) >= 3:
+                        lgb_errs = [e[0] for e in proxy_errors[tkr][-10:]]
+                        lstm_errs = [e[1] for e in proxy_errors[tkr][-10:]]
+                        total_err = sum(lgb_errs) + sum(lstm_errs)
+                        if total_err > 0:
+                            dyn_weights["lgbm"] = max(0.1, min(0.9, sum(lstm_errs) / total_err))
+                            dyn_weights["lstm"] = max(0.1, min(0.9, sum(lgb_errs) / total_err))
+
+            X_row = cache["features_np"][idx]
+            seq = cache["features_np"][idx - seq_len + 1: idx + 1] if (idx + 1) >= seq_len else np.zeros(
+                (seq_len, X_row.shape[0]), dtype=np.float32)
+
+            batch_inputs.append({
+                "tkr": tkr, "idx": idx, "X_row": X_row, "seq": seq,
+                "close": cache["close_np"][idx], "atr": cache["atr_np"][idx],
+                "dyn_weights": dyn_weights
+            })
             completed += 1
 
-            # Slice price data up to sim_date (simulate standing on that date)
-            df_slice = df_full_px[df_full_px["Date"] <= sim_date].copy()
+        if not batch_inputs: continue
 
-            if len(df_slice) < 100:
-                continue
+        X_mat = np.array([b["X_row"] for b in batch_inputs])
+        seq_mat = np.array([b["seq"] for b in batch_inputs])
 
-            # Feature engineering
-            df_feat, df_merged = engineer_features_for_slice(
-                df_slice, df_macro, df_senti, df_sector, models["features"]
-            )
+        Xs_mat = scaler.transform(X_mat)
+        raw_lgb_mat = lgbm_model.predict(Xs_mat)
 
-            if df_feat is None:
-                continue
+        raw_lstm_mat = lstm_model(seq_mat, training=False).numpy()
 
-            # HMM regime detection on the price slice
-            regime = detect_regime_for_slice(df_slice)
-            regime_counts[regime] += 1
+        for b_idx, b in enumerate(batch_inputs):
+            tkr = b["tkr"]
+            close = b["close"]
+            atr = b["atr"]
+            vol_factor = atr / close
 
-            # Dynamic Weights (Proxy Error on 5d horizon)
-            # Find the index of the 5d horizon (usually 0)
-            h5_idx = HORIZONS.index(5) if 5 in HORIZONS else 0
-            
-            # Simple 10-period rolling proxy engine
-            dyn_weights = {"lgbm": 0.5, "lstm": 0.5}
-            if tkr in proxy_errors and len(proxy_errors[tkr]) >= 3:
-                lgb_errs = [err[0] for err in proxy_errors[tkr][-10:]]
-                lstm_errs = [err[1] for err in proxy_errors[tkr][-10:]]
-                
-                sum_lgb_err = sum(lgb_errs)
-                sum_lstm_err = sum(lstm_errs)
-                total_err = sum_lgb_err + sum_lstm_err
-                
-                if total_err > 0:
-                    # Inverse weighting: lower error gets higher weight!
-                    # Bound to prevent 0 or 1 extremes
-                    raw_w_lgb = sum_lstm_err / total_err
-                    raw_w_lstm = sum_lgb_err / total_err
-                    dyn_weights["lgbm"] = max(0.1, min(0.9, raw_w_lgb))
-                    dyn_weights["lstm"] = max(0.1, min(0.9, raw_w_lstm))
+            raw_lgb = raw_lgb_mat[b_idx]
+            raw_lstm = raw_lstm_mat[b_idx]
+            raw_avg = (raw_lgb * b["dyn_weights"]["lgbm"]) + (raw_lstm * b["dyn_weights"]["lstm"])
 
-            # Predict
-            try:
-                pred = predict_at_date(df_merged, models, dynamic_weights=dyn_weights)
-            except Exception:
-                continue
-                
-            # Log the proxy error for the *previous* simulated dates if we have actuals
-            # Look back 5 days to score the models
-            eval_date = sim_date - pd.Timedelta(days=7) # approximate 5 trading days
-            past_slice = df_slice[df_slice["Date"] <= eval_date]
-            if not past_slice.empty:
-                # Get the actual return from eval_date to sim_date
-                past_close = past_slice["Close"].iloc[-1]
-                current_close = df_slice["Close"].iloc[-1]
-                actual_ret_5d = (current_close - past_close) / past_close
-                
-                # Fetch what the models predicted 5 days ago (if recorded)
-                # To save compute, we just extract from all_results if it exists
-                past_res = [r for r in all_results if r["ticker"] == tkr and r["sim_date"] == past_slice["Date"].iloc[-1]]
-                if past_res:
-                    p_res = past_res[0]
-                    lgb_past_pred = p_res.get(f"raw_ml_ret_5d_lgbm", p_res.get("raw_ml_ret_5d", 0.0))
-                    lstm_past_pred = p_res.get(f"raw_ml_ret_5d_lstm", p_res.get("raw_ml_ret_5d", 0.0))
-                    
-                    # Store proxy errors
-                    err_lgb = abs(actual_ret_5d - lgb_past_pred)
-                    err_lstm = abs(actual_ret_5d - lstm_past_pred)
-                    
-                    if tkr not in proxy_errors:
-                        proxy_errors[tkr] = []
-                    # Avoid appending duplicates for the same eval_date
-                    if not proxy_errors[tkr] or past_slice["Date"].iloc[-1] != proxy_errors_dates.get(tkr):
-                        proxy_errors[tkr].append((err_lgb, err_lstm))
-                        proxy_errors_dates[tkr] = past_slice["Date"].iloc[-1]
+            ml_prices = close * (1.0 + raw_avg)
+            hybrid = []
+            for i, h in enumerate(HORIZONS):
+                atr_offset = atr * ATR_MULT[h]
+                atr_price = close + atr_offset if np.sign(raw_avg[i]) >= 0 else close - atr_offset
+                raw_h = ml_prices[i] * WEIGHT_ML_H[h] + atr_price * WEIGHT_ATR_H[h]
 
-            # Record
+                max_move = vol_factor * np.sqrt(h) * 2.0
+                clamped = max(close * (1 - max_move), min(close * (1 + max_move), raw_h))
+                hybrid.append(clamped)
+
+            meta_signals = {}
+            for i, h in enumerate(HORIZONS):
+                if h in meta_models:
+                    try:
+                        X_meta = np.array([[raw_lgb[i], raw_lstm[i]]], dtype=np.float32)
+                        proba = meta_models[h].predict_proba(X_meta)[0]
+                        pred_class = int(meta_models[h].predict(X_meta)[0])
+                        meta_signals[h] = {
+                            "signal": ["SELL", "HOLD", "BUY"][pred_class],
+                            "confidence": float(max(proba) - sorted(proba)[-2])
+                        }
+                    except:
+                        meta_signals[h] = {"signal": "HOLD", "confidence": 0.0}
+
             result = {
-                "ticker": tkr,
-                "sim_date": sim_date,
-                "close_at_sim": pred["close"],
-                "hmm_regime": regime,
+                "ticker": tkr, "sim_date": sim_date, "close_at_sim": close,
+                "hmm_regime": macro_regime, "weight_lgbm": b["dyn_weights"]["lgbm"],
+                "weight_lstm": b["dyn_weights"]["lstm"]
             }
 
-
-            # Raw ML predictions (for transparency and proxy scoring)
             for i, h in enumerate(HORIZONS):
-                result[f"raw_ml_ret_{h}d"] = pred["raw_avg"][i]
-                result[f"raw_ml_ret_{h}d_lgbm"] = pred["raw_lgb"][i]
-                result[f"raw_ml_ret_{h}d_lstm"] = pred["raw_lstm"][i]
-                
-            # Log dynamic weights for analysis
-            result["weight_lgbm"] = dyn_weights["lgbm"]
-            result["weight_lstm"] = dyn_weights["lstm"]
+                result[f"raw_ml_ret_{h}d"] = raw_avg[i]
+                result[f"raw_ml_ret_{h}d_lgbm"] = raw_lgb[i]
+                result[f"raw_ml_ret_{h}d_lstm"] = raw_lstm[i]
+                result[f"pred_ret_{h}d"] = (hybrid[i] - close) / close
+                result[f"pred_target_{h}d"] = hybrid[i]
 
-            # Predicted returns + targets from hybrid
-            for i, h in enumerate(HORIZONS):
-                result[f"pred_ret_{h}d"] = pred["predicted_returns"][h]
-                result[f"pred_target_{h}d"] = pred["hybrid"][i]
+                if h in meta_signals:
+                    result[f"meta_signal_{h}d"] = meta_signals[h]["signal"]
+                    result[f"meta_confidence_{h}d"] = meta_signals[h]["confidence"]
 
-                # Meta-learner signal
-                if h in pred["meta_signals"]:
-                    result[f"meta_signal_{h}d"] = pred["meta_signals"][h]["signal"]
-                    result[f"meta_proba_buy_{h}d"] = pred["meta_signals"][h]["proba"][2]
-                    result[f"meta_proba_sell_{h}d"] = pred["meta_signals"][h]["proba"][0]
-                    result[f"meta_confidence_{h}d"] = pred["meta_signals"][h]["confidence"]
-
-                # Actual returns (if enough future data exists)
                 if sim_date <= max_verify_date.get(h, pd.Timestamp("2000-01-01")):
-                    future_dates = df_full_px[df_full_px["Date"] > sim_date].head(h)
-                    if len(future_dates) >= max(1, h * 0.7):  # allow some flexibility
-                        actual_close = future_dates["Close"].iloc[-1]
-                        result[f"actual_ret_{h}d"] = (actual_close - pred["close"]) / pred["close"]
-                        result[f"actual_close_{h}d"] = actual_close
+                    df_full = precomputed_cache[tkr]["df"]
+                    future_dates = df_full[df_full["Date"] > sim_date].head(h)
+                    if len(future_dates) >= max(1, int(h * 0.7)):
+                        result[f"actual_ret_{h}d"] = (future_dates["Close"].iloc[-1] - close) / close
 
             all_results.append(result)
+            results_dict[(tkr, np.datetime64(sim_date.date()))] = result
 
-            if completed % 20 == 0:
-                elapsed = time.time() - t0
-                eta = (elapsed / completed) * (total_preds - completed)
-                print(f"  [{completed}/{total_preds}] {tkr} @ {sim_date.strftime('%Y-%m-%d')} — ETA: {int(eta)}s")
+        if completed % 1000 < 200:
+            sys.stdout.write(f"\r  -> Tensor Batch Computed {completed}/{total_preds} predictions...")
+            sys.stdout.flush()
 
     results_df = pd.DataFrame(all_results)
-    print(f"  ✅ {len(results_df)} predictions recorded")
-    if regime_counts:
-        print(f"  📊 Regimes detected: " + ", ".join(f"{k}: {v}" for k, v in sorted(regime_counts.items())))
+    print(f"\n  ✅ {len(results_df)} predictions recorded")
 
-    # --- Step 5: Compute metrics ---
-    print(f"\n[5/6] Computing metrics...")
+    print("\n[5/5] Finalizing Metrics & Generating Files...")
+
     metrics = compute_metrics(results_df)
-    portfolio_metrics = compute_portfolio_metrics(results_df)
 
-    # Print report
-    print_report(
-        metrics, portfolio_metrics, results_df,
-        len(price_cache), len(sim_dates),
-        oos_start, oos_end
-    )
+    # --- DYNAMIC HORIZON TOGGLE ---
+    primary_horizon = 5  # Change this to 21, 63, etc., to change the ledger's tracking logic
 
-    # Save CSVs
+    portfolio_metrics = compute_portfolio_metrics(results_df, trade_horizon=primary_horizon)
+
+    print_report(metrics, portfolio_metrics, results_df, len(precomputed_cache), len(sim_dates), oos_start, oos_end,
+                 trade_horizon=primary_horizon)
+
     results_df.to_csv("backtest_results.csv", index=False)
-    print(f"\n💾 Results saved → backtest_results.csv")
 
-    # Save metrics
-    metrics_rows = []
+    # Safely write metrics without breaking if N/A is present
+    safe_metrics = []
     for h, m in metrics.items():
-        m["horizon"] = h
-        metrics_rows.append(m)
-    pd.DataFrame(metrics_rows).to_csv("backtest_metrics.csv", index=False)
-    print(f"💾 Metrics saved → backtest_metrics.csv")
+        if m['n_samples'] > 0:
+            safe_metrics.append({**m, "horizon": h})
+    if safe_metrics:
+        pd.DataFrame(safe_metrics).to_csv("backtest_metrics.csv", index=False)
 
-    elapsed = time.time() - t0
-    print(f"\n⏱ Total runtime: {int(elapsed // 60)}m {int(elapsed % 60)}s")
-
-    return results_df, metrics, portfolio_metrics
+    print(f"\n⏱ Total runtime: {int((time.time() - t0) // 60)}m {int((time.time() - t0) % 60)}s")
 
 
-# ===============================================================
-# CLI
-# ===============================================================
+# ------------------ CLI ------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="ChronoStox v9.5 OOS Backtester (Combined+ Edition)")
-    parser.add_argument("--tickers", nargs="+", default=None,
-                        help="Tickers to test (default: 20 Nifty stocks)")
-    parser.add_argument("--start", default="2025-11-17",
-                        help="OOS start date (default: 2025-11-17)")
-    parser.add_argument("--end", default=None,
-                        help="OOS end date (default: today)")
-    parser.add_argument("--daily", action="store_true",
-                        help="Simulate every trading day (slow)")
-    parser.add_argument("--weekly", action="store_true", default=True,
-                        help="Simulate every Friday (default)")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tickers", nargs="+", default=None)
+    parser.add_argument("--start", default="2025-11-17")
+    parser.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"))
+    parser.add_argument("--daily", action="store_true")
     args = parser.parse_args()
-
-    tickers = args.tickers if args.tickers else DEFAULT_TICKERS
-    oos_start = args.start
-    oos_end = args.end if args.end else datetime.now().strftime("%Y-%m-%d")
-    freq = "daily" if args.daily else "weekly"
-
-    print(f"\n{'=' * 60}")
-    print(f"  ChronoStox v9.4 — OOS Backtester (Quant Overlay Edition)")
-    print(f"{'=' * 60}")
-    print(f"  OOS Window : {oos_start} → {oos_end}")
-    print(f"  Tickers    : {len(tickers)}")
-    print(f"  Frequency  : {freq}")
-    print(f"{'=' * 60}")
-
-    run_backtest(tickers, oos_start, oos_end, frequency=freq)
+    run_backtest(args.tickers if args.tickers else get_dynamic_tickers(), args.start, args.end,
+                 "daily" if args.daily else "weekly")
 
 
 if __name__ == "__main__":
     main()
+
+
+# Live wrapper logic intact (engineer_features_for_slice & predict_at_date)
+def engineer_features_for_slice(df_price, df_macro, df_senti, df_sector, expected_features):
+    try:
+        df_full = precompute_features(df_price, df_macro, df_senti, df_sector, expected_features)
+        if df_full is None: return None, None
+        for c in expected_features:
+            if c not in df_full.columns: df_full[c] = 0.0
+        cols = ["Date", "Close"] + [c for c in expected_features if c in df_full.columns]
+        return df_full[cols].copy(), df_full
+    except Exception as e:
+        print(f"⚠️ engineer_features_for_slice failed: {e}")
+        return None, None
+
+
+def predict_at_date(df_merged, models):
+    out = {"close": None, "predicted_returns": {}, "predicted_targets": {}, "meta_signals": {}, "raw": {}}
+    try:
+        if df_merged is None or len(df_merged) < 1: return out
+        features = models.get("features", [])
+        scaler = models.get("scaler")
+        lgbm_model = models.get("lgbm")
+        lstm_model = models.get("lstm")
+        meta_models = models.get("meta_models", {})
+        horizons = models.get("horizons", HORIZONS)
+        seq_len = models.get("seq_len", models.get("lstm_sequence_length", 60))
+
+        latest_idx = len(df_merged) - 1
+        close = float(df_merged["Close"].iloc[latest_idx])
+        out["close"] = close
+
+        X_row = df_merged[features].iloc[latest_idx].values.astype(np.float32)
+        if latest_idx + 1 >= seq_len:
+            seq = df_merged[features].iloc[latest_idx - seq_len + 1: latest_idx + 1].values.astype(np.float32)
+        else:
+            pad = np.zeros((seq_len - (latest_idx + 1), len(features)), dtype=np.float32)
+            seq = np.vstack([pad, df_merged[features].iloc[0:latest_idx + 1].values.astype(np.float32)])
+
+        Xs = scaler.transform(X_row.reshape(1, -1))
+        raw_lgb = np.array(lgbm_model.predict(Xs)).ravel()
+        seq_in = np.expand_dims(seq, axis=0)
+        raw_lstm = lstm_model(seq_in, training=False).numpy().ravel()
+
+        raw_lgb = np.array(raw_lgb, dtype=float).ravel()
+        raw_lstm = np.array(raw_lstm, dtype=float).ravel()
+        minlen = min(len(raw_lgb), len(raw_lstm), len(horizons))
+        raw_lgb, raw_lstm = raw_lgb[:minlen], raw_lstm[:minlen]
+        raw_avg = (raw_lgb + raw_lstm) / 2.0
+
+        for i, h in enumerate(horizons[:minlen]):
+            ml_price = close * (1.0 + float(raw_avg[i]))
+            atr = float(df_merged.get("ATR_final", df_merged.get("ATR_14", df_merged["Close"] * 0.01)).iloc[latest_idx])
+            atr_offset = atr * ATR_MULT.get(h, 1.0)
+            atr_price = (close + atr_offset) if (raw_avg[i] >= 0) else (close - atr_offset)
+            raw_h = ml_price * WEIGHT_ML_H.get(h, 0.5) + atr_price * WEIGHT_ATR_H.get(h, 0.5)
+
+            vol_factor = max(atr / max(close, 1e-9), 0.0001)
+            max_move = vol_factor * np.sqrt(h) * 2.0
+            clamped = max(close * (1 - max_move), min(close * (1 + max_move), raw_h))
+
+            pred_ret = (clamped - close) / close
+            out["predicted_returns"][h] = float(pred_ret)
+            out["predicted_targets"][h] = float(clamped)
+
+            if h in meta_models:
+                try:
+                    X_meta = np.array([[raw_lgb[i], raw_lstm[i]]], dtype=np.float32)
+                    meta = meta_models[h]
+                    proba = meta.predict_proba(X_meta)[0]
+                    pred_class = int(meta.predict(X_meta)[0])
+                    mapping = {0: "SELL", 1: "HOLD", 2: "BUY"}
+                    out["meta_signals"][h] = {"signal": mapping.get(pred_class, "HOLD"),
+                                              "confidence": float(max(proba) - sorted(proba)[-2]) if len(
+                                                  proba) > 1 else float(max(proba))}
+                except:
+                    out["meta_signals"][h] = {"signal": "HOLD", "confidence": 0.0}
+
+        out["raw"]["raw_lgb"], out["raw"]["raw_lstm"], out["raw"]["raw_avg"], out["raw"][
+            "close"] = raw_lgb.tolist(), raw_lstm.tolist(), raw_avg.tolist(), close
+        return out
+    except Exception as e:
+        print(f"⚠️ predict_at_date failed: {e}")
+        return out

@@ -1,0 +1,2 @@
+label,total_return_pct,max_drawdown_pct,sharpe_ratio,total_trades,buy_trades,sell_trades,win_rate_pct,final_equity,skipped_disagreement,skipped_confidence,skipped_horizon,skipped_ticker
+COMBINED+,7.08,-4.33,2.15,723,12,711,54.1,107.08,684,418,8,0
